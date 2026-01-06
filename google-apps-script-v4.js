@@ -213,11 +213,11 @@ function testWebhook() {
     user_sentiment: 'positive',
     call_successful: true,
     call_summary: 'Test call summary for plumbing emergency',
-    fromNumber: '+15551234567',
+    fromNumber: '+1XXXXXXXXXX',
     customerName: 'John Doe',
     serviceAddress: '123 Main St, Anytown, USA',
     email: 'tech@plumbingcompany.com',
-    phone: '+15559876543',
+    phone: '+1XXXXXXXXXX',
     isitEmergency: 'Yes',
     emergencyType: 'Plumbing',
     transcript: 'This is a test transcript for the plumbing emergency call.'

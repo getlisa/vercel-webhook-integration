@@ -10,18 +10,18 @@
 // Configuration
 const CONFIG = {
   RETELL_API_KEY: 'YOUR_RETELL_API_KEY', // Set in Script Properties
-  FROM_NUMBER: '+17789465528',
-  AGENT_ID: 'agent_88461729280fe5f698d7141451',
-  FALLBACK_NUMBER: '+12063385620', // Default fallback, will be replaced by dynamic lookup
+  FROM_NUMBER: '+1XXXXXXXXXX',
+  AGENT_ID: 'agent_your_agent_id_here',
+  FALLBACK_NUMBER: '+1XXXXXXXXXX', // Default fallback, will be replaced by dynamic lookup
   SHEET_NAME: 'Sheet1',
 
   // ServiceTrade API Configuration
   SERVICETRADE: {
     AUTH_URL: 'https://app.servicetrade.com/api/auth',
     USER_API_URL: 'https://api.servicetrade.com/api/user',
-    USERNAME: 'pavan.kalyan',
-    PASSWORD: 'Claraai2025!',
-    FALLBACK_USER: 'brad westen'
+    USERNAME: 'your_username',
+    PASSWORD: 'your_password',
+    FALLBACK_USER: 'fallback_user_name'
   },
 
   // Column indices (0-based) - UPDATE THESE TO MATCH YOUR SHEET

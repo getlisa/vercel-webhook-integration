@@ -11,10 +11,10 @@
 
 // Configuration
 const CONFIG = {
-  RETELL_API_KEY: 'key_7ce8770efa1425b90a43322611e4',
-  FROM_NUMBER: '+17207308133',
-  AGENT_ID: 'agent_b6f1a61cec8749a1f64121cad5',
-  FALLBACK_NUMBER: '+12063385620', // Default fallback, will be replaced by dynamic lookup
+  RETELL_API_KEY: 'your_retell_api_key_here',
+  FROM_NUMBER: '+1XXXXXXXXXX',
+  AGENT_ID: 'agent_your_agent_id_here',
+  FALLBACK_NUMBER: '+1XXXXXXXXXX', // Default fallback, will be replaced by dynamic lookup
   SHEET_NAME: 'Call Data',
   
   // Plumbing/HVAC API Configuration

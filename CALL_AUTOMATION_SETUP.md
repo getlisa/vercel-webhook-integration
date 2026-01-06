@@ -76,7 +76,7 @@ T: call_decline_counter (number) - Default: 0
 ├─────────────────────┬───────────────────────────────────┤
 │ Transfer Success?   │ No Transfer/Failed?               │
 │ make_call = false   │ Make Fallback Call                │
-│ DONE ✅             │ Call +12063385620                 │
+│ DONE ✅             │ Call +1XXXXXXXXXX                 │
 │                     │ make_call = false, DONE ❌        │
 └─────────────────────┴───────────────────────────────────┘
 ```
@@ -86,9 +86,9 @@ T: call_decline_counter (number) - Default: 0
 ### Outbound Call (POST):
 ```javascript
 {
-  "from_number": "+17789465528",
-  "to_number": "TECH_PHONE or +12063385620",
-  "override_agent_id": "agent_88461729280fe5f698d7141451",
+  "from_number": "+1XXXXXXXXXX",
+  "to_number": "TECH_PHONE or +1XXXXXXXXXX",
+  "override_agent_id": "agent_your_agent_id_here",
   "retell_llm_dynamic_variables": {
     "customer_name": "Customer Name",
     "customer_address": "Service Address", 
@@ -144,9 +144,9 @@ Update these values in the `CONFIG` object:
 ```javascript
 const CONFIG = {
   RETELL_API_KEY: 'YOUR_API_KEY',
-  FROM_NUMBER: '+17789465528',
-  AGENT_ID: 'agent_88461729280fe5f698d7141451', 
-  FALLBACK_NUMBER: '+12063385620',
+  FROM_NUMBER: '+1XXXXXXXXXX',
+  AGENT_ID: 'agent_your_agent_id_here', 
+  FALLBACK_NUMBER: '+1XXXXXXXXXX',
   SHEET_NAME: 'Sheet1',
   
   COLUMNS: {

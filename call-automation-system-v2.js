@@ -8,16 +8,16 @@
  * - Plumbing: https://plumbing-api.vercel.app/api/assignments
  * - HVAC: https://hvacapi.vercel.app/api/assignments
  * 
- * Retell API Key: key_7ce8770efa1425b90a43322611e4
- * Google Sheets: https://docs.google.com/spreadsheets/d/1cbdvP5c-6QgZYsaXvVeTOD4VlYPKBV_yccY-lI8UFa0/edit?usp=sharing
+ * Retell API Key: your_retell_api_key_here
+ * Google Sheets: https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID/edit
  */
 
-const RETELL_API_KEY = 'key_7ce8770efa1425b90a43322611e4';
+const RETELL_API_KEY = 'your_retell_api_key_here';
 const RETELL_BASE_URL = 'https://api.retellai.com/v2';
 
 // Phone number and agent configuration
-const FROM_NUMBER = '+17207308133';
-const AGENT_ID = 'agent_b6f1a61cec8749a1f64121cad5';
+const FROM_NUMBER = '+1XXXXXXXXXX';
+const AGENT_ID = 'agent_your_agent_id_here';
 
 // API endpoints for fetching tech assignments
 const PLUMBING_API = 'https://plumbing-api.vercel.app/api/assignments';

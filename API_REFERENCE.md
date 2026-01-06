@@ -483,9 +483,9 @@ Content-Type: application/json
 **Request Body:**
 ```json
 {
-  "from_number": "+17789465528",
-  "to_number": "+1234567890",
-  "override_agent_id": "agent_88461729280fe5f698d7141451",
+  "from_number": "+1XXXXXXXXXX",
+  "to_number": "+1XXXXXXXXXX",
+  "override_agent_id": "agent_your_agent_id_here",
   "retell_llm_dynamic_variables": {
     "customer_name": "John Doe",
     "customer_address": "123 Main St",
@@ -587,9 +587,9 @@ Cookie: PHPSESSID={auth_token}
 ```javascript
 const CONFIG = {
   RETELL_API_KEY: 'key_xxxxx',
-  FROM_NUMBER: '+17789465528',
+  FROM_NUMBER: '+1XXXXXXXXXX',
   AGENT_ID: 'agent_xxxxx',
-  FALLBACK_NUMBER: '+12063385620',
+  FALLBACK_NUMBER: '+1XXXXXXXXXX',
   SHEET_NAME: 'Call Data',
   
   COLUMNS: {
