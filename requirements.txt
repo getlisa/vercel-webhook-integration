@@ -1,0 +1,2 @@
+# Minimal dependencies for Vercel serverless function
+# No external packages needed for basic webhook handling
