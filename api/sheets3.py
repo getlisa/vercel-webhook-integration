@@ -285,8 +285,8 @@ def send_to_google_sheets_v3(call_data, extracted_vars, call_summary, tech_data)
             'customerName': extracted_vars.get('customerName', ''),
             'serviceAddress': extracted_vars.get('serviceAddress', ''),
             'callSummary': extracted_vars.get('callSummary', call_summary),  # Fallback to call_summary
-            'email': tech_data.get('email', '') or extracted_vars.get('email', ''),  # Prefer API email
-            'phone': tech_data.get('phone', ''),  # Tech phone from API
+            'email': tech_data.get('email', ''),  # ONLY from API - no fallback to customer
+            'phone': tech_data.get('phone', ''),  # ONLY from API - no fallback to customer
             # Emergency variables
             'isitEmergency': extracted_vars.get('isitEmergency', ''),
             'emergencyType': extracted_vars.get('emergencyType', '')

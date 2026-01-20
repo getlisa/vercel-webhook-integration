@@ -8,11 +8,11 @@ import ssl
 import hashlib
 
 # Simple file-based deduplication to persist across serverless invocations
-PROCESSED_CALLS_FILE = '/tmp/processed_calls_sheets2.json'
+PROCESSED_CALLS_FILE = '/tmp/processed_calls_sheets4.json'
 
-def extract_variables_v2(call_data):
+def extract_variables_v4(call_data):
     """
-    Extract dynamic variables for the second webhook
+    Extract dynamic variables for the fourth webhook (Adaptive Climate)
     Variables: fromNumber, customerName, serviceAddress, callSummary, email, isitEmergency, emergencyType
     """
     variables = {
@@ -97,21 +97,15 @@ def extract_variables_v2(call_data):
     
     return variables
 
-def get_tech_data_from_api(emergency_type=''):
+def get_tech_data_from_adaptive_climate_api():
     """
-    Get tech data (email and phone) from the external API endpoints based on emergency type
-    Priority based on emergencyType:
-    - If emergencyType is 'Sprinkler': Try sprinkler API first, then fire-alarm as fallback
-    - If emergencyType is 'Fire Alarm' or empty: Try fire-alarm API first, then sprinkler as fallback
+    Get tech data (name, email and phone) from the Adaptive Climate API
     
-    Args:
-        emergency_type (str): The type of emergency ('Sprinkler', 'Fire Alarm', etc.)
-    
-    Returns: dict with 'email' and 'phone' keys
+    Returns: dict with 'name', 'email' and 'phone' keys
     """
     
     def try_api_endpoint(api_url, api_name):
-        """Helper function to try a single API endpoint and return email and phone"""
+        """Helper function to try the Adaptive Climate API endpoint"""
         try:
             print(f"[{api_name}] Trying API: {api_url}")
             
@@ -130,19 +124,19 @@ def get_tech_data_from_api(emergency_type=''):
                     # Handle case where API returns null or non-dict
                     if not isinstance(json_data, dict):
                         print(f"[{api_name}] API returned non-dict data: {type(json_data)}")
-                        return {'email': '', 'phone': ''}
+                        return {'name': '', 'email': '', 'phone': ''}
                     
                     # Check if this is just a status message
                     if 'message' in json_data and 'status' in json_data:
                         print(f"[{api_name}] API returned status message: {json_data.get('message')}")
-                        return {'email': '', 'phone': ''}
+                        return {'name': '', 'email': '', 'phone': ''}
                     
                     # Check if assignments exist and is not empty
                     assignments = json_data.get('assignments', [])
                     
                     if not assignments or len(assignments) == 0:
                         print(f"[{api_name}] No assignments found - empty array")
-                        return {'email': '', 'phone': ''}
+                        return {'name': '', 'email': '', 'phone': ''}
                     
                     # Look through assignments for techs with emails and phones
                     for assignment in assignments:
@@ -180,57 +174,25 @@ def get_tech_data_from_api(emergency_type=''):
             return {'name': '', 'email': '', 'phone': ''}
     
     try:
-        # Define API endpoints
-        fire_alarm_api = "https://fire-alarm-men6qqx0l-mahees-projects-2df6704a.vercel.app/api/assignments"
-        sprinkler_api = "https://sprinkler-p52oxcmyy-mahees-projects-2df6704a.vercel.app/api/assignments"
+        # Define Adaptive Climate API endpoint
+        adaptive_climate_api = "https://adaptive-climate.vercel.app/api/assignments"
         
-        # Determine API priority based on emergency type
-        if emergency_type == 'Sprinkler':
-            primary_api = sprinkler_api
-            primary_name = "SPRINKLER API"
-            fallback_api = fire_alarm_api
-            fallback_name = "FIRE ALARM API"
-            print(f"[API] Emergency type is 'Sprinkler' - trying Sprinkler API first")
-        elif emergency_type == 'Fire Alarm':
-            primary_api = fire_alarm_api
-            primary_name = "FIRE ALARM API"
-            fallback_api = sprinkler_api
-            fallback_name = "SPRINKLER API"
-            print(f"[API] Emergency type is 'Fire Alarm' - trying Fire Alarm API first")
-        else:
-            # Default to Fire Alarm API for empty or unknown emergency types
-            primary_api = fire_alarm_api
-            primary_name = "FIRE ALARM API"
-            fallback_api = sprinkler_api
-            fallback_name = "SPRINKLER API"
-            print(f"[API] Emergency type is '{emergency_type}' (unknown/empty) - defaulting to Fire Alarm API first")
+        print(f"[API] Trying Adaptive Climate API...")
         
-        # Try primary API first
-        result = try_api_endpoint(primary_api, primary_name)
+        # Try Adaptive Climate API
+        result = try_api_endpoint(adaptive_climate_api, "ADAPTIVE CLIMATE API")
         
         # Ensure result is a dict
         if not isinstance(result, dict):
             result = {'name': '', 'email': '', 'phone': ''}
         
         if result.get('email') or result.get('phone'):
-            print(f"[API] SUCCESS: Got data from {primary_name} - name: {result.get('name', '')}, email: {result.get('email', '')}, phone: {result.get('phone', '')}")
+            print(f"[API] SUCCESS: Got data from Adaptive Climate API - name: {result.get('name', '')}, email: {result.get('email', '')}, phone: {result.get('phone', '')}")
             return result
         
-        # If no data from primary, try fallback API
-        print(f"[API] No data from {primary_name}, trying {fallback_name}...")
-        result = try_api_endpoint(fallback_api, fallback_name)
+        print("[API] No email or phone found from Adaptive Climate API")
         
-        # Ensure result is a dict
-        if not isinstance(result, dict):
-            result = {'name': '', 'email': '', 'phone': ''}
-        
-        if result.get('email') or result.get('phone'):
-            print(f"[API] SUCCESS: Got data from {fallback_name} - name: {result.get('name', '')}, email: {result.get('email', '')}, phone: {result.get('phone', '')}")
-            return result
-        
-        print("[API] No email or phone found from either API")
-        
-        # Fallback to environment variables if APIs don't have data
+        # Fallback to environment variables if API doesn't have data
         fallback_email = os.environ.get('FALLBACK_TECH_EMAIL', '')
         fallback_phone = os.environ.get('FALLBACK_TECH_PHONE', '')
         
@@ -241,7 +203,7 @@ def get_tech_data_from_api(emergency_type=''):
         return {'name': '', 'email': '', 'phone': ''}
         
     except Exception as e:
-        print(f"[API ERROR] Exception in get_tech_data_from_api: {e}")
+        print(f"[API ERROR] Exception in get_tech_data_from_adaptive_climate_api: {e}")
         
         # Fallback to environment variables on error
         fallback_email = os.environ.get('FALLBACK_TECH_EMAIL', '')
@@ -253,18 +215,18 @@ def get_tech_data_from_api(emergency_type=''):
         
         return {'name': '', 'email': '', 'phone': ''}
 
-def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data):
+def send_to_google_sheets_v4(call_data, extracted_vars, call_summary, tech_data):
     """
-    Send call analysis data to the second Google Sheets using Google Apps Script Web App
+    Send call analysis data to the fourth Google Sheets using Google Apps Script Web App (Adaptive Climate)
     """
     try:
-        # Use the second Google Sheets URL (will be set as environment variable)
-        sheets_url = os.environ.get('GOOGLE_SHEETS_URL_2', '')
+        # Use the fourth Google Sheets URL (will be set as environment variable)
+        sheets_url = os.environ.get('GOOGLE_SHEETS_URL_4', '')
         
-        print(f"[SHEETS2] Using URL: {sheets_url[:50]}..." if sheets_url else "[SHEETS2] No URL set")
+        print(f"[SHEETS4] Using URL: {sheets_url[:50]}..." if sheets_url else "[SHEETS4] No URL set")
         
         if not sheets_url:
-            print("[ERROR] GOOGLE_SHEETS_URL_2 environment variable not set")
+            print("[ERROR] GOOGLE_SHEETS_URL_4 environment variable not set")
             return False
         
         # Get transcript
@@ -285,21 +247,23 @@ def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
             'customerName': extracted_vars.get('customerName', ''),
             'serviceAddress': extracted_vars.get('serviceAddress', ''),
             'callSummary': extracted_vars.get('callSummary', call_summary),  # Fallback to call_summary
-            'email': tech_data.get('email', ''),  # ONLY from API - no fallback to customer
-            'phone': tech_data.get('phone', ''),  # ONLY from API - no fallback to customer
+            'email': tech_data.get('email', '') or extracted_vars.get('email', ''),  # Prefer API email
+            'phone': tech_data.get('phone', ''),  # Tech phone from API
+            'techName': tech_data.get('name', ''),  # Tech name from API
             # Emergency variables
             'isitEmergency': extracted_vars.get('isitEmergency', ''),
             'emergencyType': extracted_vars.get('emergencyType', '')
         }
         
         # Log the data being sent for debugging
-        print(f"[SHEETS2] Data being sent:")
-        print(f"[SHEETS2] fromNumber: '{sheet_data.get('fromNumber')}'")
-        print(f"[SHEETS2] customerName: '{sheet_data.get('customerName')}'")
-        print(f"[SHEETS2] serviceAddress: '{sheet_data.get('serviceAddress')}'")
-        print(f"[SHEETS2] email: '{sheet_data.get('email')}'")
-        print(f"[SHEETS2] phone: '{sheet_data.get('phone')}'")
-        print(f"[SHEETS2] Tech data used - email: '{tech_data.get('email', '')}', phone: '{tech_data.get('phone', '')}'")
+        print(f"[SHEETS4] Data being sent:")
+        print(f"[SHEETS4] fromNumber: '{sheet_data.get('fromNumber')}'")
+        print(f"[SHEETS4] customerName: '{sheet_data.get('customerName')}'")
+        print(f"[SHEETS4] serviceAddress: '{sheet_data.get('serviceAddress')}'")
+        print(f"[SHEETS4] email: '{sheet_data.get('email')}'")
+        print(f"[SHEETS4] phone: '{sheet_data.get('phone')}'")
+        print(f"[SHEETS4] techName: '{sheet_data.get('techName')}'")
+        print(f"[SHEETS4] Tech data used - name: '{tech_data.get('name', '')}', email: '{tech_data.get('email', '')}', phone: '{tech_data.get('phone', '')}'")
         
         # Convert to JSON and encode
         data = json.dumps(sheet_data).encode('utf-8')
@@ -314,11 +278,11 @@ def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
         # Send request
         with urllib.request.urlopen(req, timeout=10) as response:
             result = response.read().decode('utf-8')
-            print(f"[SHEETS2] Data sent successfully: {result}")
+            print(f"[SHEETS4] Data sent successfully: {result}")
             return True
             
     except Exception as e:
-        print(f"[SHEETS2 ERROR] Failed to send data: {e}")
+        print(f"[SHEETS4 ERROR] Failed to send data: {e}")
         return False
 
 class handler(BaseHTTPRequestHandler):
@@ -346,7 +310,7 @@ class handler(BaseHTTPRequestHandler):
             
             # Check if already processed
             if content_hash in processed_calls:
-                print(f"[SHEETS2] Found duplicate hash: {content_hash}")
+                print(f"[SHEETS4] Found duplicate hash: {content_hash}")
                 return True
             
             # Mark as processed
@@ -362,11 +326,11 @@ class handler(BaseHTTPRequestHandler):
             # Save updated list
             self.save_processed_calls(processed_calls)
             
-            print(f"[SHEETS2] New call hash: {content_hash}")
+            print(f"[SHEETS4] New call hash: {content_hash}")
             return False
             
         except Exception as e:
-            print(f"[SHEETS2 ERROR] Error checking duplicate: {e}")
+            print(f"[SHEETS4 ERROR] Error checking duplicate: {e}")
             return False  # If error, allow processing to continue
 
     def load_processed_calls(self):
@@ -376,7 +340,7 @@ class handler(BaseHTTPRequestHandler):
                 with open(PROCESSED_CALLS_FILE, 'r') as f:
                     return json.load(f)
         except Exception as e:
-            print(f"[SHEETS2 ERROR] Error loading processed calls: {e}")
+            print(f"[SHEETS4 ERROR] Error loading processed calls: {e}")
         return {}
 
     def save_processed_calls(self, processed_calls):
@@ -385,7 +349,7 @@ class handler(BaseHTTPRequestHandler):
             with open(PROCESSED_CALLS_FILE, 'w') as f:
                 json.dump(processed_calls, f)
         except Exception as e:
-            print(f"[SHEETS2 ERROR] Error saving processed calls: {e}")
+            print(f"[SHEETS4 ERROR] Error saving processed calls: {e}")
 
     def cleanup_processed_calls(self, processed_calls):
         """Clean up old processed calls to prevent file from growing too large"""
@@ -410,10 +374,10 @@ class handler(BaseHTTPRequestHandler):
                 processed_calls.clear()
                 processed_calls.update(dict(sorted_items[:1000]))
                 
-            print(f"[SHEETS2] Cleaned up processed calls, {len(processed_calls)} entries remaining")
+            print(f"[SHEETS4] Cleaned up processed calls, {len(processed_calls)} entries remaining")
             
         except Exception as e:
-            print(f"[SHEETS2 ERROR] Error cleaning up processed calls: {e}")
+            print(f"[SHEETS4 ERROR] Error cleaning up processed calls: {e}")
 
     def do_GET(self):
         """Handle GET requests (health check)"""
@@ -423,17 +387,19 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
         
         response = {
-            "message": "Google Sheets Integration API v2",
+            "message": "Google Sheets Integration API v4 (Adaptive Climate)",
             "status": "healthy",
-            "variables": ["fromNumber", "customerName", "serviceAddress", "callSummary", "email"],
+            "variables": ["fromNumber", "customerName", "serviceAddress", "callSummary", "email", "techName"],
+            "api": "Adaptive Climate API",
+            "escalation_flow": "On-call tech → John McLean → Alex Kovachev → John McLean (2 numbers) → Brian Kerr → John McLean (continuous)",
             "endpoints": {
-                "POST /": "Process call analysis data and send to Google Sheets v2"
+                "POST /": "Process call analysis data and send to Google Sheets v4 with escalation automation"
             }
         }
         self.wfile.write(json.dumps(response).encode())
 
     def do_POST(self):
-        """Handle POST requests - process call analysis and send to Google Sheets v2"""
+        """Handle POST requests - process call analysis and send to Google Sheets v4"""
         try:
             # Read the request body
             content_length = int(self.headers.get('Content-Length', 0))
@@ -448,13 +414,13 @@ class handler(BaseHTTPRequestHandler):
             call_data = body.get("call", {})
             call_id = call_data.get("call_id", "unknown")
             
-            print(f"[SHEETS2 API] Received event: {event_type}, Call ID: {call_id}")
+            print(f"[SHEETS4 API] Received event: {event_type}, Call ID: {call_id}")
             
             # Only process call_analyzed events
             if event_type == "call_analyzed":
                 # Check for duplicate processing
                 if self.is_duplicate_call(call_data):
-                    print(f"[SHEETS2] Duplicate call detected, skipping processing for {call_id}")
+                    print(f"[SHEETS4] Duplicate call detected, skipping processing for {call_id}")
                     response_data = {
                         "status": "skipped",
                         "message": "Duplicate call ignored",
@@ -470,56 +436,41 @@ class handler(BaseHTTPRequestHandler):
                 analysis = call_data.get("call_analysis", {})
                 call_summary = analysis.get("call_summary", "")
                 
-                print(f"[SHEETS2 API] Processing new call analysis for {call_id}")
-                
-                # DETAILED DEBUGGING - Check payload structure
-                print("=" * 60)
-                print(f"DEBUG V2: ANALYZING CALL {call_id}")
-                print(f"DEBUG V2: Call data keys: {list(call_data.keys())}")
-                
-                # Check for collected_dynamic_variables
-                collected_vars = call_data.get('collected_dynamic_variables', {})
-                print(f"DEBUG V2: collected_dynamic_variables exists: {bool(collected_vars)}")
-                if collected_vars:
-                    print(f"DEBUG V2: collected_dynamic_variables content: {collected_vars}")
-                
-                print("=" * 60)
+                print(f"[SHEETS4 API] Processing new call analysis for {call_id}")
                 
                 # Extract variables from Retell's call data
-                extracted_vars = extract_variables_v2(call_data)
-                print(f"[SHEETS2 API] FINAL EXTRACTED VARIABLES: {extracted_vars}")
+                extracted_vars = extract_variables_v4(call_data)
+                print(f"[SHEETS4 API] FINAL EXTRACTED VARIABLES: {extracted_vars}")
                 
-                # Get tech data from external APIs based on emergency type
+                # Get tech data from Adaptive Climate API
                 try:
-                    emergency_type = extracted_vars.get('emergencyType', '')
-                    print(f"[SHEETS2] Emergency type detected: '{emergency_type}'")
-                    print(f"[SHEETS2] Calling get_tech_data_from_api() with emergency_type='{emergency_type}'...")
-                    tech_data = get_tech_data_from_api(emergency_type)
+                    print(f"[SHEETS4] Calling get_tech_data_from_adaptive_climate_api()...")
+                    tech_data = get_tech_data_from_adaptive_climate_api()
                     if not isinstance(tech_data, dict):
                         tech_data = {'name': '', 'email': '', 'phone': ''}
-                    print(f"[SHEETS2] Tech data from API: {tech_data}")
-                    print(f"[SHEETS2] Tech data name: '{tech_data.get('name', '')}'")
-                    print(f"[SHEETS2] Tech data email: '{tech_data.get('email', '')}'")
-                    print(f"[SHEETS2] Tech data phone: '{tech_data.get('phone', '')}'")
+                    print(f"[SHEETS4] Tech data from API: {tech_data}")
+                    print(f"[SHEETS4] Tech data name: '{tech_data.get('name', '')}'")
+                    print(f"[SHEETS4] Tech data email: '{tech_data.get('email', '')}'")
+                    print(f"[SHEETS4] Tech data phone: '{tech_data.get('phone', '')}'")
                 except Exception as e:
-                    print(f"[SHEETS2] Error getting tech data: {e}")
+                    print(f"[SHEETS4] Error getting tech data: {e}")
                     tech_data = {'name': '', 'email': '', 'phone': ''}
                 
                 # Log successful extractions
                 non_empty_vars = {k: v for k, v in extracted_vars.items() if v}
                 if non_empty_vars:
-                    print(f"[SHEETS2 API] SUCCESS: Extracted {len(non_empty_vars)} variables: {non_empty_vars}")
+                    print(f"[SHEETS4 API] SUCCESS: Extracted {len(non_empty_vars)} variables: {non_empty_vars}")
                 else:
-                    print(f"[SHEETS2 API] ERROR: No variables extracted for call {call_id}")
+                    print(f"[SHEETS4 API] ERROR: No variables extracted for call {call_id}")
                 
                 # Send to Google Sheets
                 try:
-                    success = send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
+                    success = send_to_google_sheets_v4(call_data, extracted_vars, call_summary, tech_data)
                     
                     if success:
                         response_data = {
                             "status": "success",
-                            "message": "Data sent to Google Sheets v2",
+                            "message": "Data sent to Google Sheets v4 (Adaptive Climate)",
                             "call_id": call_id,
                             "extracted_variables": extracted_vars,
                             "transcript": call_data.get('transcript', ''),
@@ -542,7 +493,7 @@ class handler(BaseHTTPRequestHandler):
                         self.send_response(200)  # Return 200 since data was likely saved
                         
                 except Exception as e:
-                    print(f"[SHEETS2 API ERROR] Exception in Google Sheets operation: {e}")
+                    print(f"[SHEETS4 API ERROR] Exception in Google Sheets operation: {e}")
                     response_data = {
                         "status": "partial_success", 
                         "message": "Data processing completed but response generation failed",
@@ -570,7 +521,7 @@ class handler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps(response_data).encode())
             
         except json.JSONDecodeError as e:
-            print(f"[SHEETS2 API ERROR] Invalid JSON payload: {e}")
+            print(f"[SHEETS4 API ERROR] Invalid JSON payload: {e}")
             self.send_response(400)
             self.send_header('Content-type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
@@ -579,7 +530,7 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(error_response).encode())
             
         except Exception as e:
-            print(f"[SHEETS2 API ERROR] Processing failed: {e}")
+            print(f"[SHEETS4 API ERROR] Processing failed: {e}")
             self.send_response(500)
             self.send_header('Content-type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
