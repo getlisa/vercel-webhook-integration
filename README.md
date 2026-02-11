@@ -1,5 +1,4 @@
 # Retell AI Google Sheets Integration
-
 A comprehensive serverless webhook system that integrates Retell AI voice agents with Google Sheets for automated call data collection and analysis. This system supports multiple specialized endpoints for different business use cases including fire safety, plumbing/HVAC services, and general call automation.
 
 ## 🏗️ Project Architecture
