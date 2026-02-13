@@ -12,7 +12,7 @@ PROCESSED_CALLS_FILE = '/tmp/processed_calls_sheets3.json'
 
 def extract_variables_v3(call_data):
     """
-    Extract dynamic variables for the third webhook
+    Extract dynamic variables for the third webhook for Braconier
     Variables: fromNumber, customerName, serviceAddress, callSummary, email, isitEmergency, emergencyType
     """
     variables = {
