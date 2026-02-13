@@ -220,13 +220,13 @@ def send_to_google_sheets_v4(call_data, extracted_vars, call_summary, tech_data)
     Send call analysis data to the fourth Google Sheets using Google Apps Script Web App (Adaptive Climate)
     """
     try:
-        # Use the fourth Google Sheets URL (will be set as environment variable)
-        sheets_url = os.environ.get('GOOGLE_SHEETS_URL_4', '')
+        # Use the Adaptive Climate webhook URL (set as environment variable)
+        sheets_url = os.environ.get('ADAPTIVE_EXEC_URL', '')
         
         print(f"[SHEETS4] Using URL: {sheets_url[:50]}..." if sheets_url else "[SHEETS4] No URL set")
         
         if not sheets_url:
-            print("[ERROR] GOOGLE_SHEETS_URL_4 environment variable not set")
+            print("[ERROR] ADAPTIVE_EXEC_URL environment variable not set")
             return False
         
         # Get transcript

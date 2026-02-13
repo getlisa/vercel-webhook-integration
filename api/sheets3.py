@@ -258,13 +258,13 @@ def send_to_google_sheets_v3(call_data, extracted_vars, call_summary, tech_data)
     Send call analysis data to the third Google Sheets using Google Apps Script Web App
     """
     try:
-        # Use the third Google Sheets URL (will be set as environment variable)
-        sheets_url = os.environ.get('GOOGLE_SHEETS_URL_3', '')
+        # Use the Braconier webhook URL (set as environment variable)
+        sheets_url = os.environ.get('BRACONIER_EXEC_URL', '')
         
         print(f"[SHEETS3] Using URL: {sheets_url[:50]}..." if sheets_url else "[SHEETS3] No URL set")
         
         if not sheets_url:
-            print("[ERROR] GOOGLE_SHEETS_URL_3 environment variable not set")
+            print("[ERROR] BRACONIER_EXEC_URL environment variable not set")
             return False
         
         # Get transcript

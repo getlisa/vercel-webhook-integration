@@ -258,13 +258,13 @@ def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
     Send call analysis data to the second Google Sheets using Google Apps Script Web App
     """
     try:
-        # Use the second Google Sheets URL (will be set as environment variable)
-        sheets_url = os.environ.get('GOOGLE_SHEETS_URL_2', '')
+        # Use the Pacific webhook URL (set as environment variable)
+        sheets_url = os.environ.get('PACIFIC_EXEC_URL', '')
         
         print(f"[SHEETS2] Using URL: {sheets_url[:50]}..." if sheets_url else "[SHEETS2] No URL set")
         
         if not sheets_url:
-            print("[ERROR] GOOGLE_SHEETS_URL_2 environment variable not set")
+            print("[ERROR] PACIFIC_EXEC_URL environment variable not set")
             return False
         
         # Get transcript

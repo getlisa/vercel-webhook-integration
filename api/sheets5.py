@@ -148,13 +148,13 @@ def send_to_google_sheets_v5(call_data, extracted_vars, call_summary):
     Send call analysis data to the fifth Google Sheets using Google Apps Script Web App (EliteFire)
     """
     try:
-        # Use the fifth Google Sheets URL (will be set as environment variable)
-        sheets_url = os.environ.get('GOOGLE_SHEETS_URL_5', '')
+        # Use the EliteFire webhook URL (set as environment variable)
+        sheets_url = os.environ.get('ELITEFIRE_EXEC_URL', '')
         
         print(f"[SHEETS5] Using URL: {sheets_url[:50]}..." if sheets_url else "[SHEETS5] No URL set")
         
         if not sheets_url:
-            print("[ERROR] GOOGLE_SHEETS_URL_5 environment variable not set")
+            print("[ERROR] ELITEFIRE_EXEC_URL environment variable not set")
             return False
         
         # Get email from external API
