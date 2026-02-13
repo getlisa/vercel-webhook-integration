@@ -12,7 +12,7 @@ PROCESSED_CALLS_FILE = '/tmp/processed_calls_sheets2.json'
 
 def extract_variables_v2(call_data):
     """
-    Extract dynamic variables for the second webhook
+    Extract dynamic variables for the second webhook for Pacific western
     Variables: fromNumber, customerName, serviceAddress, callSummary, email, isitEmergency, emergencyType
     """
     variables = {
