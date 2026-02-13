@@ -25,22 +25,120 @@ def extract_variables_v4(call_data):
         'emergencyType': ''
     }
     
+    def has_values(var_dict):
+        """Return True when at least one extracted variable has data."""
+        return any(bool(v) for v in var_dict.values())
+
+    def normalize_isit_emergency(value):
+        """Normalize emergency flag to TRUE/FALSE strings."""
+        if value is None:
+            return ''
+        if isinstance(value, bool):
+            return 'TRUE' if value else 'FALSE'
+
+        raw = str(value).strip()
+        if not raw:
+            return ''
+
+        lowered = raw.lower()
+        if lowered in ('true', 'yes', '1', 'y'):
+            return 'TRUE'
+        if lowered in ('false', 'no', '0', 'n'):
+            return 'FALSE'
+
+        return raw
+
+    def finalize(var_dict):
+        """Normalize extracted variables before returning."""
+        var_dict['isitEmergency'] = normalize_isit_emergency(var_dict.get('isitEmergency', ''))
+        return var_dict
+
     # Method 1: collected_dynamic_variables (primary location)
     collected_vars = call_data.get('collected_dynamic_variables', {})
     if collected_vars and any(collected_vars.values()):
+        matched = False
         for key in variables.keys():
             if key in collected_vars and collected_vars[key]:
                 variables[key] = str(collected_vars[key])
-        return variables
+                matched = True
+        if matched:
+            return finalize(variables)
     
     # Method 2: Look in call_analysis.custom_analysis_data
     analysis = call_data.get('call_analysis', {})
     custom_data = analysis.get('custom_analysis_data', {})
     if custom_data and any(custom_data.values()):
+        # Direct matches first
         for key in variables.keys():
             if key in custom_data and custom_data[key]:
                 variables[key] = str(custom_data[key])
-        return variables
+
+        # Map common alternate keys used by Retell custom analysis outputs
+        if not variables['fromNumber']:
+            variables['fromNumber'] = str(
+                custom_data.get('caller_phone', '') or
+                custom_data.get('phone', '') or
+                call_data.get('from_number', '')
+            )
+
+        if not variables['customerName']:
+            variables['customerName'] = str(
+                custom_data.get('caller_name', '') or
+                custom_data.get('customer_name', '') or
+                custom_data.get('name', '')
+            )
+
+        if not variables['email']:
+            variables['email'] = str(
+                custom_data.get('caller_email', '') or
+                custom_data.get('customer_email', '')
+            )
+
+        if not variables['callSummary']:
+            variables['callSummary'] = str(
+                custom_data.get('issue_description', '') or
+                custom_data.get('call_summary', '') or
+                analysis.get('call_summary', '')
+            )
+
+        # Build service address from parts if a pre-joined address is not present
+        if not variables['serviceAddress']:
+            address_line = (
+                custom_data.get('service_address', '') or
+                custom_data.get('address', '') or
+                custom_data.get('address_line1', '')
+            )
+            city = custom_data.get('city', '')
+            state = custom_data.get('state', '')
+            postal = custom_data.get('postal_code', '')
+            parts = [str(p).strip() for p in [address_line, city, state, postal] if p]
+            variables['serviceAddress'] = ', '.join(parts)
+
+        if not variables['isitEmergency']:
+            raw_emergency = (
+                custom_data.get('isEmergency', '') or
+                custom_data.get('is_emergency', '')
+            )
+            variables['isitEmergency'] = normalize_isit_emergency(raw_emergency)
+
+        if not variables['emergencyType']:
+            variables['emergencyType'] = str(
+                custom_data.get('emergency_type', '') or
+                custom_data.get('service_type', '') or
+                custom_data.get('issue_type', '')
+            )
+
+        # Adaptive is HVAC-focused; infer emergency type if still missing
+        if not variables['emergencyType']:
+            issue_text = (
+                str(custom_data.get('issue_description', '')) + ' ' +
+                str(analysis.get('call_summary', ''))
+            ).lower()
+            if any(token in issue_text for token in ['hvac', 'air conditioner', 'ac', 'furnace', 'heating', 'cooling']):
+                variables['emergencyType'] = 'HVAC'
+
+        if has_values(variables):
+            return finalize(variables)
     
     # Method 3: Look for extract_variables tool call result in transcript_with_tool_calls
     transcript_with_tools = call_data.get('transcript_with_tool_calls', [])
@@ -67,7 +165,8 @@ def extract_variables_v4(call_data):
                                 for key in variables.keys():
                                     if key in source_vars and source_vars[key]:
                                         variables[key] = str(source_vars[key])
-                                return variables
+                                if has_values(variables):
+                                    return finalize(variables)
                         except (json.JSONDecodeError, TypeError):
                             continue
     
@@ -86,7 +185,7 @@ def extract_variables_v4(call_data):
                                     variables[key] = str(result[key])
                                     found_vars = True
                             if found_vars:
-                                return variables
+                                return finalize(variables)
                     except (json.JSONDecodeError, TypeError):
                         continue
     
@@ -94,8 +193,14 @@ def extract_variables_v4(call_data):
     for key in variables.keys():
         if key in call_data and call_data[key]:
             variables[key] = str(call_data[key])
+
+    # Final fallbacks from top-level Retell fields
+    if not variables['fromNumber'] and call_data.get('from_number'):
+        variables['fromNumber'] = str(call_data.get('from_number'))
+    if not variables['callSummary']:
+        variables['callSummary'] = str(analysis.get('call_summary', ''))
     
-    return variables
+    return finalize(variables)
 
 def get_tech_data_from_adaptive_climate_api():
     """
