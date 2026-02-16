@@ -14,6 +14,8 @@ def extract_variables_v3(call_data):
     """
     Extract dynamic variables for the third webhook for Braconier
     Variables: fromNumber, customerName, serviceAddress, callSummary, email, isitEmergency, emergencyType
+    
+    ENHANCED VERSION: Uses Adaptive Climate extraction logic with better fallback mappings
     """
     variables = {
         'fromNumber': '',
@@ -25,22 +27,113 @@ def extract_variables_v3(call_data):
         'emergencyType': ''
     }
     
+    def has_values(var_dict):
+        """Return True when at least one extracted variable has data."""
+        return any(bool(v) for v in var_dict.values())
+
+    def normalize_isit_emergency(value):
+        """Normalize emergency flag to TRUE/FALSE strings."""
+        if value is None:
+            return ''
+        if isinstance(value, bool):
+            return 'TRUE' if value else 'FALSE'
+
+        raw = str(value).strip()
+        if not raw:
+            return ''
+
+        lowered = raw.lower()
+        if lowered in ('true', 'yes', '1', 'y'):
+            return 'TRUE'
+        if lowered in ('false', 'no', '0', 'n'):
+            return 'FALSE'
+
+        return raw
+
+    def finalize(var_dict):
+        """Normalize extracted variables before returning."""
+        var_dict['isitEmergency'] = normalize_isit_emergency(var_dict.get('isitEmergency', ''))
+        return var_dict
+    
     # Method 1: collected_dynamic_variables (primary location)
     collected_vars = call_data.get('collected_dynamic_variables', {})
     if collected_vars and any(collected_vars.values()):
+        matched = False
         for key in variables.keys():
             if key in collected_vars and collected_vars[key]:
                 variables[key] = str(collected_vars[key])
-        return variables
+                matched = True
+        if matched:
+            return finalize(variables)
     
-    # Method 2: Look in call_analysis.custom_analysis_data
+    # Method 2: Look in call_analysis.custom_analysis_data with enhanced fallback mappings
     analysis = call_data.get('call_analysis', {})
     custom_data = analysis.get('custom_analysis_data', {})
     if custom_data and any(custom_data.values()):
+        # Direct matches first
         for key in variables.keys():
             if key in custom_data and custom_data[key]:
                 variables[key] = str(custom_data[key])
-        return variables
+
+        # Map common alternate keys used by Retell custom analysis outputs
+        if not variables['fromNumber']:
+            variables['fromNumber'] = str(
+                custom_data.get('caller_phone', '') or
+                custom_data.get('phone', '') or
+                call_data.get('from_number', '')
+            )
+
+        if not variables['customerName']:
+            variables['customerName'] = str(
+                custom_data.get('caller_name', '') or
+                custom_data.get('customer_name', '') or
+                custom_data.get('name', '')
+            )
+
+        if not variables['email']:
+            variables['email'] = str(
+                custom_data.get('caller_email', '') or
+                custom_data.get('customer_email', '')
+            )
+
+        if not variables['callSummary']:
+            variables['callSummary'] = str(
+                custom_data.get('issue_description', '') or
+                custom_data.get('call_summary', '') or
+                analysis.get('call_summary', '')
+            )
+
+        # Build service address from parts if a pre-joined address is not present
+        if not variables['serviceAddress']:
+            address_line = (
+                custom_data.get('service_address', '') or
+                custom_data.get('address', '') or
+                custom_data.get('caller_address', '') or
+                custom_data.get('address_line1', '')
+            )
+            city = custom_data.get('city', '')
+            state = custom_data.get('state', '')
+            postal = custom_data.get('postal_code', '')
+            parts = [str(p).strip() for p in [address_line, city, state, postal] if p]
+            variables['serviceAddress'] = ', '.join(parts)
+
+        if not variables['isitEmergency']:
+            raw_emergency = (
+                custom_data.get('isEmergency', '') or
+                custom_data.get('is_emergency', '') or
+                custom_data.get('isitEmergency', '')
+            )
+            variables['isitEmergency'] = normalize_isit_emergency(raw_emergency)
+
+        if not variables['emergencyType']:
+            variables['emergencyType'] = str(
+                custom_data.get('emergency_type', '') or
+                custom_data.get('service_type', '') or
+                custom_data.get('issue_type', '')
+            )
+
+        if has_values(variables):
+            return finalize(variables)
     
     # Method 3: Look for extract_variables tool call result in transcript_with_tool_calls
     transcript_with_tools = call_data.get('transcript_with_tool_calls', [])
@@ -67,7 +160,8 @@ def extract_variables_v3(call_data):
                                 for key in variables.keys():
                                     if key in source_vars and source_vars[key]:
                                         variables[key] = str(source_vars[key])
-                                return variables
+                                if has_values(variables):
+                                    return finalize(variables)
                         except (json.JSONDecodeError, TypeError):
                             continue
     
@@ -86,7 +180,7 @@ def extract_variables_v3(call_data):
                                     variables[key] = str(result[key])
                                     found_vars = True
                             if found_vars:
-                                return variables
+                                return finalize(variables)
                     except (json.JSONDecodeError, TypeError):
                         continue
     
@@ -94,8 +188,14 @@ def extract_variables_v3(call_data):
     for key in variables.keys():
         if key in call_data and call_data[key]:
             variables[key] = str(call_data[key])
+
+    # Final fallbacks from top-level Retell fields
+    if not variables['fromNumber'] and call_data.get('from_number'):
+        variables['fromNumber'] = str(call_data.get('from_number'))
+    if not variables['callSummary']:
+        variables['callSummary'] = str(analysis.get('call_summary', ''))
     
-    return variables
+    return finalize(variables)
 
 def get_tech_data_from_api(emergency_type=''):
     """
@@ -270,36 +370,50 @@ def send_to_google_sheets_v3(call_data, extracted_vars, call_summary, tech_data)
         # Get transcript
         transcript = call_data.get('transcript', '')
         
-        # Prepare data for Google Sheets with the new variables
+        # Prepare data for Google Sheets matching exact header structure:
+        # Timestamp, Call ID, Agent Name, Duration (ms), Sentiment, Successful, Call Summary, 
+        # From Number, Customer Name, Service Address, Email, Phone, Is Emergency, Emergency Type, 
+        # Transcript, make_call, response_call_id_1, response_call_id_2, response_call_id_3, 
+        # call_decline_counter, LAST_CALL_TIME, is_email_sent, NOTE
+        
         sheet_data = {
             'timestamp': datetime.now().isoformat(),
             'call_id': call_data.get('call_id', ''),
             'agent_name': call_data.get('agent_name', ''),
-            'call_duration': call_data.get('duration_ms', 0),
-            'user_sentiment': call_data.get('call_analysis', {}).get('user_sentiment', ''),
-            'call_successful': call_data.get('call_analysis', {}).get('call_successful', False),
+            'duration_ms': call_data.get('duration_ms', 0),
+            'sentiment': call_data.get('call_analysis', {}).get('user_sentiment', ''),
+            'successful': call_data.get('call_analysis', {}).get('call_successful', False),
             'call_summary': call_summary,
+            'from_number': extracted_vars.get('fromNumber', ''),
+            'customer_name': extracted_vars.get('customerName', ''),
+            'service_address': extracted_vars.get('serviceAddress', ''),
+            'email': tech_data.get('email', ''),  # Tech email from API
+            'phone': tech_data.get('phone', ''),  # Tech phone from API
+            'is_emergency': extracted_vars.get('isitEmergency', ''),
+            'emergency_type': extracted_vars.get('emergencyType', ''),
             'transcript': transcript,
-            # New variables for this webhook
-            'fromNumber': extracted_vars.get('fromNumber', ''),
-            'customerName': extracted_vars.get('customerName', ''),
-            'serviceAddress': extracted_vars.get('serviceAddress', ''),
-            'callSummary': extracted_vars.get('callSummary', call_summary),  # Fallback to call_summary
-            'email': tech_data.get('email', ''),  # ONLY from API - no fallback to customer
-            'phone': tech_data.get('phone', ''),  # ONLY from API - no fallback to customer
-            # Emergency variables
-            'isitEmergency': extracted_vars.get('isitEmergency', ''),
-            'emergencyType': extracted_vars.get('emergencyType', '')
+            'make_call': True,  # Always set to True initially
+            'response_call_id_1': '',
+            'response_call_id_2': '',
+            'response_call_id_3': '',
+            'call_decline_counter': 0,
+            'last_call_time': '',
+            'is_email_sent': False,  # Always FALSE when sending to Apps Script
+            'note': ''
         }
         
         # Log the data being sent for debugging
         print(f"[SHEETS3] Data being sent:")
-        print(f"[SHEETS3] fromNumber: '{sheet_data.get('fromNumber')}'")
-        print(f"[SHEETS3] customerName: '{sheet_data.get('customerName')}'")
-        print(f"[SHEETS3] serviceAddress: '{sheet_data.get('serviceAddress')}'")
+        print(f"[SHEETS3] from_number: '{sheet_data.get('from_number')}'")
+        print(f"[SHEETS3] customer_name: '{sheet_data.get('customer_name')}'")
+        print(f"[SHEETS3] service_address: '{sheet_data.get('service_address')}'")
         print(f"[SHEETS3] email: '{sheet_data.get('email')}'")
         print(f"[SHEETS3] phone: '{sheet_data.get('phone')}'")
-        print(f"[SHEETS3] Tech data used - email: '{tech_data.get('email', '')}', phone: '{tech_data.get('phone', '')}'")
+        print(f"[SHEETS3] is_emergency: '{sheet_data.get('is_emergency')}'")
+        print(f"[SHEETS3] emergency_type: '{sheet_data.get('emergency_type')}'")
+        print(f"[SHEETS3] make_call: '{sheet_data.get('make_call')}'")
+        print(f"[SHEETS3] is_email_sent: '{sheet_data.get('is_email_sent')}'")
+        print(f"[SHEETS3] Tech data used - name: '{tech_data.get('name', '')}', email: '{tech_data.get('email', '')}', phone: '{tech_data.get('phone', '')}'")
         
         # Convert to JSON and encode
         data = json.dumps(sheet_data).encode('utf-8')
@@ -425,7 +539,7 @@ class handler(BaseHTTPRequestHandler):
         response = {
             "message": "Google Sheets Integration API v3 (Plumbing/HVAC)",
             "status": "healthy",
-            "variables": ["fromNumber", "customerName", "serviceAddress", "callSummary", "email"],
+            "variables": ["fromNumber", "customerName", "serviceAddress", "callSummary", "email", "phone", "techName", "isitEmergency", "emergencyType"],
             "apis": ["Plumbing API", "HVAC API"],
             "endpoints": {
                 "POST /": "Process call analysis data and send to Google Sheets v3"
