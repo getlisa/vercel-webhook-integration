@@ -436,6 +436,8 @@ def send_to_google_sheets_v3(call_data, extracted_vars, call_summary, tech_data)
         return False
 
 class handler(BaseHTTPRequestHandler):
+    """Braconier webhook handler for processing Retell call events"""
+    
     def is_duplicate_call(self, call_data):
         """Check if this call has already been processed using content hash"""
         try:
