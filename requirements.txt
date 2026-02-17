@@ -1,2 +1,2 @@
-# Minimal dependencies for Vercel serverless function
-# No external packages needed for basic webhook handling
+# Python dependencies for Vercel serverless functions
+# Using standard library only - no external packages needed
