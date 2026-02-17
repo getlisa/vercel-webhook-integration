@@ -1,15 +1,24 @@
 {
-  "buildCommand": "",
-  "outputDirectory": "",
-  "framework": null,
   "rewrites": [
     {
       "source": "/",
-      "destination": "/api/overview"
+      "destination": "/api/webhook"
     },
     {
-      "source": "/health",
-      "destination": "/api/health"
+      "source": "/braconier",
+      "destination": "/api/webhook?client=braconier"
+    },
+    {
+      "source": "/adaptive",
+      "destination": "/api/webhook?client=adaptive"
+    },
+    {
+      "source": "/elitefire",
+      "destination": "/api/webhook?client=elitefire"
+    },
+    {
+      "source": "/pacific",
+      "destination": "/api/webhook?client=pacific"
     }
   ]
 }
