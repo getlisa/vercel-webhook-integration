@@ -1,6 +1,0 @@
-[project]
-name = "vercel-webhook-integration"
-version = "0.1.0"
-description = "Webhook integration for voice agent"
-requires-python = ">=3.9"
-dependencies = []
