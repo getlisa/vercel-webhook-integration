@@ -14,6 +14,8 @@ def extract_variables_v2(call_data):
     """
     Extract dynamic variables for the second webhook for Pacific Western
     Variables: fromNumber, customerName, serviceAddress, callSummary, email, isitEmergency, emergencyType
+    
+    ENHANCED VERSION: Uses better fallback mappings for caller_phone and other fields
     """
     variables = {
         'fromNumber': '',
@@ -25,22 +27,116 @@ def extract_variables_v2(call_data):
         'emergencyType': ''
     }
     
+    def has_values(var_dict):
+        """Return True when at least one extracted variable has data."""
+        return any(bool(v) for v in var_dict.values())
+
+    def normalize_isit_emergency(value):
+        """Normalize emergency flag to TRUE/FALSE strings."""
+        if value is None:
+            return ''
+        if isinstance(value, bool):
+            return 'TRUE' if value else 'FALSE'
+
+        raw = str(value).strip()
+        if not raw:
+            return ''
+
+        lowered = raw.lower()
+        if lowered in ('true', 'yes', '1', 'y'):
+            return 'TRUE'
+        if lowered in ('false', 'no', '0', 'n'):
+            return 'FALSE'
+
+        return raw
+
+    def finalize(var_dict):
+        """Normalize extracted variables before returning."""
+        var_dict['isitEmergency'] = normalize_isit_emergency(var_dict.get('isitEmergency', ''))
+        return var_dict
+    
     # Method 1: collected_dynamic_variables (primary location)
     collected_vars = call_data.get('collected_dynamic_variables', {})
     if collected_vars and any(collected_vars.values()):
+        matched = False
         for key in variables.keys():
             if key in collected_vars and collected_vars[key]:
                 variables[key] = str(collected_vars[key])
-        return variables
+                matched = True
+        if matched:
+            return finalize(variables)
     
-    # Method 2: Look in call_analysis.custom_analysis_data
+    # Method 2: Look in call_analysis.custom_analysis_data with enhanced fallback mappings
     analysis = call_data.get('call_analysis', {})
     custom_data = analysis.get('custom_analysis_data', {})
     if custom_data and any(custom_data.values()):
+        # Direct matches first
         for key in variables.keys():
             if key in custom_data and custom_data[key]:
                 variables[key] = str(custom_data[key])
-        return variables
+
+        # Map common alternate keys used by Retell custom analysis outputs
+        if not variables['fromNumber']:
+            variables['fromNumber'] = str(
+                custom_data.get('caller_phone', '') or
+                custom_data.get('phone', '') or
+                custom_data.get('fromNumber', '') or
+                call_data.get('from_number', '')
+            )
+
+        if not variables['customerName']:
+            variables['customerName'] = str(
+                custom_data.get('caller_name', '') or
+                custom_data.get('customer_name', '') or
+                custom_data.get('name', '')
+            )
+
+        if not variables['email']:
+            variables['email'] = str(
+                custom_data.get('caller_email', '') or
+                custom_data.get('customer_email', '')
+            )
+
+        if not variables['callSummary']:
+            variables['callSummary'] = str(
+                custom_data.get('issue_description', '') or
+                custom_data.get('call_summary', '') or
+                analysis.get('call_summary', '')
+            )
+
+        # Build service address from parts if a pre-joined address is not present
+        if not variables['serviceAddress']:
+            address_line = (
+                custom_data.get('service_address', '') or
+                custom_data.get('serviceAddress', '') or
+                custom_data.get('address', '') or
+                custom_data.get('caller_address', '') or
+                custom_data.get('address_line1', '')
+            )
+            city = custom_data.get('city', '')
+            state = custom_data.get('state', '')
+            postal = custom_data.get('postal_code', '') or custom_data.get('postalCode', '')
+            parts = [str(p).strip() for p in [address_line, city, state, postal] if p]
+            variables['serviceAddress'] = ', '.join(parts)
+
+        if not variables['isitEmergency']:
+            raw_emergency = (
+                custom_data.get('isitEmergency', '') or
+                custom_data.get('isEmergency', '') or
+                custom_data.get('is_emergency', '')
+            )
+            variables['isitEmergency'] = normalize_isit_emergency(raw_emergency)
+
+        if not variables['emergencyType']:
+            variables['emergencyType'] = str(
+                custom_data.get('emergencyType', '') or
+                custom_data.get('emergency_type', '') or
+                custom_data.get('service_type', '') or
+                custom_data.get('issue_type', '')
+            )
+
+        if has_values(variables):
+            return finalize(variables)
     
     # Method 3: Look for extract_variables tool call result in transcript_with_tool_calls
     transcript_with_tools = call_data.get('transcript_with_tool_calls', [])
@@ -67,7 +163,8 @@ def extract_variables_v2(call_data):
                                 for key in variables.keys():
                                     if key in source_vars and source_vars[key]:
                                         variables[key] = str(source_vars[key])
-                                return variables
+                                if has_values(variables):
+                                    return finalize(variables)
                         except (json.JSONDecodeError, TypeError):
                             continue
     
@@ -86,7 +183,7 @@ def extract_variables_v2(call_data):
                                     variables[key] = str(result[key])
                                     found_vars = True
                             if found_vars:
-                                return variables
+                                return finalize(variables)
                     except (json.JSONDecodeError, TypeError):
                         continue
     
@@ -94,8 +191,14 @@ def extract_variables_v2(call_data):
     for key in variables.keys():
         if key in call_data and call_data[key]:
             variables[key] = str(call_data[key])
+
+    # Final fallbacks from top-level Retell fields
+    if not variables['fromNumber'] and call_data.get('from_number'):
+        variables['fromNumber'] = str(call_data.get('from_number'))
+    if not variables['callSummary']:
+        variables['callSummary'] = str(analysis.get('call_summary', ''))
     
-    return variables
+    return finalize(variables)
 
 def get_tech_data_from_api(emergency_type=''):
     """
@@ -180,9 +283,9 @@ def get_tech_data_from_api(emergency_type=''):
             return {'name': '', 'email': '', 'phone': ''}
     
     try:
-        # Define API endpoints
-        fire_alarm_api = "https://fire-alarm-men6qqx0l-mahees-projects-2df6704a.vercel.app/api/assignments"
-        sprinkler_api = "https://sprinkler-p52oxcmyy-mahees-projects-2df6704a.vercel.app/api/assignments"
+        # Define API endpoints (unified fetchoncall API)
+        fire_alarm_api = "https://fetchoncall.vercel.app/api/assignments?service=fire-alarm"
+        sprinkler_api = "https://fetchoncall.vercel.app/api/assignments?service=sprinkler"
         
         # Determine API priority based on emergency type
         if emergency_type == 'Sprinkler':
@@ -311,8 +414,13 @@ def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
             headers={'Content-Type': 'application/json'}
         )
         
-        # Send request
-        with urllib.request.urlopen(req, timeout=10) as response:
+        # Send request - use longer timeout for Google Apps Script
+        # Create SSL context that doesn't verify certificates (for Vercel environment)
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        with urllib.request.urlopen(req, timeout=20, context=ssl_context) as response:
             result = response.read().decode('utf-8')
             print(f"[SHEETS2] Data sent successfully: {result}")
             return True
