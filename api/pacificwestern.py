@@ -63,12 +63,45 @@ def extract_variables_v2(call_data):
     # Method 1: collected_dynamic_variables (primary location)
     collected_vars = call_data.get('collected_dynamic_variables', {})
     if collected_vars and any(collected_vars.values()):
-        matched = False
+        # Direct key matches
         for key in variables.keys():
             if key in collected_vars and collected_vars[key]:
                 variables[key] = str(collected_vars[key])
-                matched = True
-        if matched:
+        
+        # Handle alternate key names in collected_dynamic_variables
+        if not variables['isitEmergency']:
+            raw_emergency = (
+                collected_vars.get('isitEmergency', '') or
+                collected_vars.get('isEmergency', '') or
+                collected_vars.get('is_emergency', '')
+            )
+            variables['isitEmergency'] = normalize_isit_emergency(raw_emergency)
+        
+        if not variables['emergencyType']:
+            variables['emergencyType'] = str(
+                collected_vars.get('emergencyType', '') or
+                collected_vars.get('emergency_type', '') or
+                ''
+            )
+        
+        if not variables['customerName']:
+            variables['customerName'] = str(
+                collected_vars.get('customerName', '') or
+                collected_vars.get('caller_name', '') or
+                collected_vars.get('customer_name', '') or
+                ''
+            )
+        
+        if not variables['callSummary']:
+            variables['callSummary'] = str(
+                collected_vars.get('callSummary', '') or
+                collected_vars.get('call_summary', '') or
+                collected_vars.get('issue_description', '') or
+                ''
+            )
+        
+        # If we have good data from collected_vars, return it
+        if has_values(variables):
             return finalize(variables)
     
     # Method 2: Look in call_analysis.custom_analysis_data with enhanced fallback mappings
@@ -578,11 +611,18 @@ def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
         
         # Log the data being sent for debugging
         print(f"[SHEETS2] Data being sent:")
+        print(f"[SHEETS2] call_id: '{sheet_data.get('call_id')}'")
+        print(f"[SHEETS2] call_duration: '{sheet_data.get('call_duration')}'")
+        print(f"[SHEETS2] user_sentiment: '{sheet_data.get('user_sentiment')}'")
+        print(f"[SHEETS2] call_successful: '{sheet_data.get('call_successful')}'")
         print(f"[SHEETS2] fromNumber: '{sheet_data.get('fromNumber')}'")
         print(f"[SHEETS2] customerName: '{sheet_data.get('customerName')}'")
         print(f"[SHEETS2] serviceAddress: '{sheet_data.get('serviceAddress')}'")
+        print(f"[SHEETS2] callSummary: '{str(sheet_data.get('callSummary', ''))[:100]}...'")
         print(f"[SHEETS2] email: '{sheet_data.get('email')}'")
         print(f"[SHEETS2] phone: '{sheet_data.get('phone')}'")
+        print(f"[SHEETS2] isitEmergency: '{sheet_data.get('isitEmergency')}'")
+        print(f"[SHEETS2] emergencyType: '{sheet_data.get('emergencyType')}'")
         print(f"[SHEETS2] rateApproved: '{sheet_data.get('rateApproved')}'")
         print(f"[SHEETS2] callType: '{sheet_data.get('callType')}'")
         print(f"[SHEETS2] Tech data used - email: '{tech_data.get('email', '')}', phone: '{tech_data.get('phone', '')}'")
