@@ -55,9 +55,29 @@ def extract_variables_v2(call_data):
 
         return raw
 
+    def is_valid_phone(phone):
+        """Check if phone number looks valid (has at least 10 digits)."""
+        if not phone:
+            return False
+        digits = ''.join(c for c in str(phone) if c.isdigit())
+        return len(digits) >= 10
+
     def finalize(var_dict):
         """Normalize extracted variables before returning."""
         var_dict['isitEmergency'] = normalize_isit_emergency(var_dict.get('isitEmergency', ''))
+        
+        # CRITICAL: Always prefer from_number (actual caller ID) over LLM-extracted phone
+        # LLM might extract partial/invalid phone numbers from conversation
+        actual_from_number = call_data.get('from_number', '')
+        extracted_from_number = var_dict.get('fromNumber', '')
+        
+        if actual_from_number and is_valid_phone(actual_from_number):
+            # Always use the actual caller ID from Retell
+            var_dict['fromNumber'] = str(actual_from_number)
+        elif not is_valid_phone(extracted_from_number) and actual_from_number:
+            # If extracted phone is invalid but we have from_number, use it
+            var_dict['fromNumber'] = str(actual_from_number)
+        
         return var_dict
     
     # Method 1: collected_dynamic_variables (primary location)
