@@ -10,6 +10,11 @@ import hashlib
 # Simple file-based deduplication to persist across serverless invocations
 PROCESSED_CALLS_FILE = '/tmp/processed_calls_sheets2.json'
 
+# SendGrid Configuration for Pacific Western emails
+SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '')
+SENDGRID_FROM_EMAIL = 'developer@justclara.ai'
+SENDGRID_FROM_NAME = 'Pacific Western - Clara AI'
+
 def extract_variables_v2(call_data):
     """
     Extract dynamic variables for the second webhook for Pacific Western
@@ -200,6 +205,174 @@ def extract_variables_v2(call_data):
     
     return finalize(variables)
 
+
+# ============================================
+# EMAIL FUNCTIONS FOR PACIFIC WESTERN
+# ============================================
+
+def send_email_via_sendgrid(to_email, cc_emails, subject, html_content):
+    """Send email using SendGrid API"""
+    try:
+        if not SENDGRID_API_KEY:
+            print("[EMAIL ERROR] SENDGRID_API_KEY not set")
+            return False
+        
+        # Build personalization
+        personalization = {
+            "to": [{"email": to_email}]
+        }
+        
+        # Add CC if provided
+        if cc_emails:
+            cc_list = []
+            for cc in cc_emails:
+                if cc and cc.strip() and '@' in cc:
+                    cc_list.append({"email": cc.strip()})
+            if cc_list:
+                personalization["cc"] = cc_list
+        
+        payload = {
+            "personalizations": [personalization],
+            "from": {"email": SENDGRID_FROM_EMAIL, "name": SENDGRID_FROM_NAME},
+            "subject": subject,
+            "content": [{"type": "text/html", "value": html_content}]
+        }
+        
+        data = json.dumps(payload).encode('utf-8')
+        
+        req = urllib.request.Request(
+            'https://api.sendgrid.com/v3/mail/send',
+            data=data,
+            headers={
+                'Authorization': f'Bearer {SENDGRID_API_KEY}',
+                'Content-Type': 'application/json'
+            }
+        )
+        
+        with urllib.request.urlopen(req, timeout=15) as response:
+            if response.getcode() == 202:
+                print(f"[EMAIL] Successfully sent to {to_email}")
+                return True
+            else:
+                print(f"[EMAIL ERROR] Unexpected status: {response.getcode()}")
+                return False
+                
+    except urllib.error.HTTPError as e:
+        print(f"[EMAIL ERROR] HTTP Error: {e.code} - {e.read().decode()}")
+        return False
+    except Exception as e:
+        print(f"[EMAIL ERROR] Exception: {e}")
+        return False
+
+
+def send_scheduling_email(caller_name, callback_number, service_address, emergency_type, call_summary):
+    """Send email to scheduling@pwfire.ca when caller declines after-hours rate"""
+    html_content = f'''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ background-color: #f39c12; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }}
+            .content {{ background-color: #f9f9f9; padding: 20px; }}
+            .section {{ margin-bottom: 15px; background-color: #fff; padding: 15px; border-radius: 5px; border-left: 4px solid #f39c12; }}
+            .label {{ font-weight: bold; color: #555; }}
+            .footer {{ text-align: center; padding: 15px; color: #777; font-size: 12px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2 style="margin: 0;">📋 After-Hours Call - Rate Declined</h2>
+            </div>
+            <div class="content">
+                <p><strong>A caller reported an emergency but declined the after-hours rate. Please follow up during business hours.</strong></p>
+                
+                <div class="section">
+                    <h3 style="margin-top: 0; color: #f39c12;">Caller Information</h3>
+                    <p><span class="label">Name:</span> {caller_name or 'Not provided'}</p>
+                    <p><span class="label">Callback Number:</span> {callback_number or 'Not provided'}</p>
+                    <p><span class="label">Service Address:</span> {service_address or 'Not provided'}</p>
+                    <p><span class="label">Emergency Type:</span> {emergency_type or 'Not specified'}</p>
+                </div>
+                
+                <div class="section">
+                    <h3 style="margin-top: 0; color: #f39c12;">Call Summary</h3>
+                    <p>{call_summary or 'No summary available'}</p>
+                </div>
+                
+                <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; margin-top: 15px;">
+                    <p style="margin: 0;"><strong>⚠️ Note:</strong> The caller was informed that we cannot guarantee immediate availability due to our schedule.</p>
+                </div>
+            </div>
+            <div class="footer">
+                <p>This email was automatically generated by Clara AI - Pacific Western After-Hours System</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    '''
+    
+    return send_email_via_sendgrid(
+        to_email='scheduling@pwfire.ca',
+        cc_emails=['bharath.valusa@justclara.ai'],
+        subject=f'After-Hours Call - Rate Declined - {caller_name or "Customer"}',
+        html_content=html_content
+    )
+
+
+def send_reception_email(caller_name, callback_number, inquiry_summary):
+    """Send email to reception@pwfire.ca for general inquiries"""
+    html_content = f'''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ background-color: #3498db; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }}
+            .content {{ background-color: #f9f9f9; padding: 20px; }}
+            .section {{ margin-bottom: 15px; background-color: #fff; padding: 15px; border-radius: 5px; border-left: 4px solid #3498db; }}
+            .label {{ font-weight: bold; color: #555; }}
+            .footer {{ text-align: center; padding: 15px; color: #777; font-size: 12px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2 style="margin: 0;">📞 After-Hours Message</h2>
+            </div>
+            <div class="content">
+                <p><strong>A caller left a message after hours. Please follow up during business hours.</strong></p>
+                
+                <div class="section">
+                    <h3 style="margin-top: 0; color: #3498db;">Caller Information</h3>
+                    <p><span class="label">Name:</span> {caller_name or 'Not provided'}</p>
+                    <p><span class="label">Callback Number:</span> {callback_number or 'Not provided'}</p>
+                </div>
+                
+                <div class="section">
+                    <h3 style="margin-top: 0; color: #3498db;">Message / Inquiry</h3>
+                    <p>{inquiry_summary or 'No details provided'}</p>
+                </div>
+            </div>
+            <div class="footer">
+                <p>This email was automatically generated by Clara AI - Pacific Western After-Hours System</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    '''
+    
+    return send_email_via_sendgrid(
+        to_email='reception@pwfire.ca',
+        cc_emails=['bharath.valusa@justclara.ai'],
+        subject=f'After-Hours Message - {caller_name or "Customer"}',
+        html_content=html_content
+    )
+
+
 def get_tech_data_from_api(emergency_type=''):
     """
     Get tech data (email and phone) from the external API endpoints based on emergency type
@@ -374,6 +547,11 @@ def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
         transcript = call_data.get('transcript', '')
         
         # Prepare data for Google Sheets with the new variables
+        # Get rate approval and call type from collected_dynamic_variables
+        collected_vars = call_data.get('collected_dynamic_variables', {})
+        rate_approved = collected_vars.get('rateApproved', '')
+        call_type = collected_vars.get('callType', '')
+        
         sheet_data = {
             'timestamp': datetime.now().isoformat(),
             'call_id': call_data.get('call_id', ''),
@@ -392,7 +570,10 @@ def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
             'phone': tech_data.get('phone', ''),  # ONLY from API - no fallback to customer
             # Emergency variables
             'isitEmergency': extracted_vars.get('isitEmergency', ''),
-            'emergencyType': extracted_vars.get('emergencyType', '')
+            'emergencyType': extracted_vars.get('emergencyType', ''),
+            # Rate approval and call type from LLM dynamic variables
+            'rateApproved': rate_approved,
+            'callType': call_type
         }
         
         # Log the data being sent for debugging
@@ -402,6 +583,8 @@ def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
         print(f"[SHEETS2] serviceAddress: '{sheet_data.get('serviceAddress')}'")
         print(f"[SHEETS2] email: '{sheet_data.get('email')}'")
         print(f"[SHEETS2] phone: '{sheet_data.get('phone')}'")
+        print(f"[SHEETS2] rateApproved: '{sheet_data.get('rateApproved')}'")
+        print(f"[SHEETS2] callType: '{sheet_data.get('callType')}'")
         print(f"[SHEETS2] Tech data used - email: '{tech_data.get('email', '')}', phone: '{tech_data.get('phone', '')}'")
         
         # Convert to JSON and encode
@@ -620,6 +803,40 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     print(f"[SHEETS2 API] ERROR: No variables extracted for call {call_id}")
                 
+                # Check for rate approval status and call type from collected_dynamic_variables
+                rate_approved = collected_vars.get('rateApproved', '').lower()
+                is_emergency = extracted_vars.get('isitEmergency', '').upper()
+                call_type = collected_vars.get('callType', '').lower()  # 'emergency', 'inquiry', 'billing', etc.
+                
+                print(f"[SHEETS2] Rate approved: '{rate_approved}', Is emergency: '{is_emergency}', Call type: '{call_type}'")
+                
+                # Determine if we need to send scheduling or reception email
+                email_sent_type = None
+                
+                # If emergency but rate was declined -> email scheduling@pwfire.ca
+                if is_emergency == 'TRUE' and rate_approved in ['no', 'false', 'declined']:
+                    print(f"[SHEETS2] Rate declined for emergency - sending email to scheduling@pwfire.ca")
+                    email_result = send_scheduling_email(
+                        caller_name=extracted_vars.get('customerName', ''),
+                        callback_number=extracted_vars.get('fromNumber', ''),
+                        service_address=extracted_vars.get('serviceAddress', ''),
+                        emergency_type=extracted_vars.get('emergencyType', ''),
+                        call_summary=extracted_vars.get('callSummary', '') or call_summary
+                    )
+                    email_sent_type = 'scheduling' if email_result else None
+                    print(f"[SHEETS2] Scheduling email sent: {email_result}")
+                
+                # If non-emergency / general inquiry -> email reception@pwfire.ca
+                elif is_emergency != 'TRUE' or call_type in ['inquiry', 'general', 'question', 'other']:
+                    print(f"[SHEETS2] Non-emergency call - sending email to reception@pwfire.ca")
+                    email_result = send_reception_email(
+                        caller_name=extracted_vars.get('customerName', ''),
+                        callback_number=extracted_vars.get('fromNumber', ''),
+                        inquiry_summary=extracted_vars.get('callSummary', '') or call_summary
+                    )
+                    email_sent_type = 'reception' if email_result else None
+                    print(f"[SHEETS2] Reception email sent: {email_result}")
+                
                 # Send to Google Sheets
                 try:
                     success = send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
@@ -632,6 +849,7 @@ class handler(BaseHTTPRequestHandler):
                             "extracted_variables": extracted_vars,
                             "transcript": call_data.get('transcript', ''),
                             "tech_data": tech_data,
+                            "email_sent_to": email_sent_type,
                             "call_metadata": {
                                 "agent_name": call_data.get('agent_name', ''),
                                 "duration_ms": call_data.get('duration_ms', 0),
@@ -645,7 +863,8 @@ class handler(BaseHTTPRequestHandler):
                             "status": "partial_success",
                             "message": "Data may have been sent to Google Sheets but response failed",
                             "call_id": call_id,
-                            "extracted_variables": extracted_vars
+                            "extracted_variables": extracted_vars,
+                            "email_sent_to": email_sent_type
                         }
                         self.send_response(200)  # Return 200 since data was likely saved
                         
