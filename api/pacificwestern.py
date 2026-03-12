@@ -13,6 +13,40 @@ PROCESSED_CALLS_FILE = '/tmp/processed_calls_sheets2.json'
 # SendGrid Configuration for Pacific Western emails
 SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '')
 SENDGRID_FROM_EMAIL = 'developer@justclara.ai'
+
+def forward_to_api_gateway(body_str, signature_header):
+    """Forward webhook to API gateway synchronously before responding.
+    Must complete within the serverless request lifecycle."""
+    api_gateway_url = os.environ.get('API_GATEWAY_URL', '').strip()
+    if not api_gateway_url:
+        return
+
+    event_type = None
+    try:
+        body_dict = json.loads(body_str)
+        event_type = body_dict.get("event", "")
+    except:
+        pass
+
+    # Only forward call_started, call_ended, and call_analyzed events
+    if event_type not in ["call_started", "call_ended", "call_analyzed"]:
+        return
+
+    try:
+        data = body_str.encode('utf-8')
+        req = urllib.request.Request(
+            api_gateway_url,
+            data=data,
+            headers={
+                'Content-Type': 'application/json',
+                'x-retell-signature': signature_header or ''
+            }
+        )
+        with urllib.request.urlopen(req, timeout=3) as response:
+            print(f"[API_GATEWAY] Forwarded {event_type} event, status: {response.status}")
+    except Exception as e:
+        # Swallow errors — forward failures must never block the main webhook response
+        print(f"[API_GATEWAY] Error forwarding webhook: {e}")
 SENDGRID_FROM_NAME = 'Pacific Western - Clara AI'
 
 def extract_variables_v2(call_data):
@@ -790,9 +824,19 @@ class handler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 0:
                 post_data = self.rfile.read(content_length)
-                body = json.loads(post_data.decode('utf-8'))
+                body_str = post_data.decode('utf-8')
+                body = json.loads(body_str)
             else:
+                body_str = '{}'
                 body = {}
+            
+            # Forward to API gateway (non-blocking, only for call_started, call_ended, and call_analyzed)
+            signature_header = self.headers.get('x-retell-signature', '') or self.headers.get('X-Retell-Signature', '')
+            try:
+                forward_to_api_gateway(body_str, signature_header)
+            except Exception as fwd_err:
+                # Isolated guard — forwarding errors must never affect the main response
+                print(f"[API_GATEWAY] Unexpected forwarding error (ignored): {fwd_err}")
             
             # Extract event information
             event_type = body.get("event", "unknown")
