@@ -10,6 +10,29 @@ import hashlib
 # Simple file-based deduplication to persist across serverless invocations
 PROCESSED_CALLS_FILE = '/tmp/processed_calls_sheets3.json'
 
+def normalize_phone_number(value):
+    """Return a normalized E.164-like phone number when possible."""
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+
+    digits = ''.join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 10:
+        return f'+1{digits}'
+    if len(digits) == 11 and digits.startswith('1'):
+        return f'+{digits}'
+    if 11 <= len(digits) <= 15:
+        return f'+{digits}'
+    return ''
+
+def pick_best_from_number(*candidates):
+    """Prefer the first valid phone number, otherwise return an empty string."""
+    for candidate in candidates:
+        normalized = normalize_phone_number(candidate)
+        if normalized:
+            return normalized
+    return ''
+
 def extract_variables_v3(call_data):
     """
     Extract dynamic variables for the third webhook for Braconier
@@ -75,13 +98,15 @@ def extract_variables_v3(call_data):
             if key in custom_data and custom_data[key]:
                 variables[key] = str(custom_data[key])
 
-        # Map common alternate keys used by Retell custom analysis outputs
-        if not variables['fromNumber']:
-            variables['fromNumber'] = str(
-                custom_data.get('caller_phone', '') or
-                custom_data.get('phone', '') or
-                call_data.get('from_number', '')
-            )
+        # Map common alternate keys used by Retell custom analysis outputs.
+        # If extracted data is not a real phone number, fall back to the actual caller number.
+        actual_from_number = call_data.get('from_number', '')
+        extracted_from_number = (
+            custom_data.get('caller_phone', '') or
+            custom_data.get('phone', '') or
+            variables.get('fromNumber', '')
+        )
+        variables['fromNumber'] = pick_best_from_number(extracted_from_number, actual_from_number)
 
         if not variables['customerName']:
             variables['customerName'] = str(
@@ -190,8 +215,10 @@ def extract_variables_v3(call_data):
             variables[key] = str(call_data[key])
 
     # Final fallbacks from top-level Retell fields
-    if not variables['fromNumber'] and call_data.get('from_number'):
-        variables['fromNumber'] = str(call_data.get('from_number'))
+    variables['fromNumber'] = pick_best_from_number(
+        variables.get('fromNumber', ''),
+        call_data.get('from_number', '')
+    )
     if not variables['callSummary']:
         variables['callSummary'] = str(analysis.get('call_summary', ''))
     
@@ -507,7 +534,7 @@ class handler(BaseHTTPRequestHandler):
         """Clean up old processed calls to prevent file from growing too large"""
         try:
             current_time = datetime.now()
-            cutoff_time = current_time.timestamp() - (24 * 60 * 60 * 1000)  # 24 hours ago in milliseconds
+            cutoff_time = current_time.timestamp() * 1000 - (24 * 60 * 60 * 1000)  # 24 hours ago in milliseconds
             
             # Remove entries older than 24 hours
             to_remove = []
