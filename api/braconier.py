@@ -49,6 +49,8 @@ def extract_variables_v3(call_data):
         'isitEmergency': '',
         'emergencyType': ''
     }
+    analysis = call_data.get('call_analysis', {})
+    custom_data = analysis.get('custom_analysis_data', {})
     
     def has_values(var_dict):
         """Return True when at least one extracted variable has data."""
@@ -75,6 +77,12 @@ def extract_variables_v3(call_data):
 
     def finalize(var_dict):
         """Normalize extracted variables before returning."""
+        var_dict['fromNumber'] = pick_best_from_number(
+            var_dict.get('fromNumber', ''),
+            call_data.get('from_number', ''),
+            custom_data.get('caller_phone', ''),
+            custom_data.get('phone', '')
+        )
         var_dict['isitEmergency'] = normalize_isit_emergency(var_dict.get('isitEmergency', ''))
         return var_dict
     
@@ -90,8 +98,6 @@ def extract_variables_v3(call_data):
             return finalize(variables)
     
     # Method 2: Look in call_analysis.custom_analysis_data with enhanced fallback mappings
-    analysis = call_data.get('call_analysis', {})
-    custom_data = analysis.get('custom_analysis_data', {})
     if custom_data and any(custom_data.values()):
         # Direct matches first
         for key in variables.keys():
