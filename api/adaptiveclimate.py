@@ -1,6 +1,7 @@
 from http.server import BaseHTTPRequestHandler
 import json
 import os
+import time
 from datetime import datetime
 import urllib.request
 import urllib.parse
@@ -32,6 +33,52 @@ def pick_best_from_number(*candidates):
         if normalized:
             return normalized
     return ''
+
+CRITICAL_FIELDS = ['isitEmergency', 'customerName', 'fromNumber']
+
+def fetch_call_from_retell(call_id, api_key):
+    """Fetch the full call object from the Retell API."""
+    url = f"https://api.retellai.com/v2/get-call/{call_id}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    })
+    ctx = ssl.create_default_context()
+    with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+def ensure_complete_data(call_data, extracted_vars):
+    """
+    If critical extracted fields are missing, re-fetch the call from
+    the Retell API after a short delay so the analysis has time to finish.
+    Returns a (possibly updated) tuple of (call_data, extracted_vars).
+    """
+    missing = [f for f in CRITICAL_FIELDS if not extracted_vars.get(f)]
+    if not missing:
+        return call_data, extracted_vars
+
+    api_key = os.environ.get('RETELL_API_KEY', 'key_69831f5ea37c7733b21533331182')
+
+    call_id = call_data.get('call_id', '')
+    print(f"[RETRY] Missing critical fields {missing} for {call_id}, waiting 3s then re-fetching...")
+
+    for attempt in range(1, 4):
+        delay = 3 * attempt
+        time.sleep(delay)
+        try:
+            fresh = fetch_call_from_retell(call_id, api_key)
+            fresh_vars = extract_variables_v4(fresh)
+            still_missing = [f for f in CRITICAL_FIELDS if not fresh_vars.get(f)]
+            print(f"[RETRY] Attempt {attempt} after {delay}s – still missing: {still_missing}")
+            if not still_missing:
+                return fresh, fresh_vars
+            call_data = fresh
+            extracted_vars = fresh_vars
+        except Exception as e:
+            print(f"[RETRY] Attempt {attempt} failed: {e}")
+
+    print(f"[RETRY] Exhausted retries, proceeding with best available data")
+    return call_data, extracted_vars
 
 def extract_variables_v4(call_data):
     """
@@ -390,7 +437,8 @@ def send_to_google_sheets_v4(call_data, extracted_vars, call_summary, tech_data)
             'techName': tech_data.get('name', ''),  # Tech name from API
             # Emergency variables
             'isitEmergency': extracted_vars.get('isitEmergency', ''),
-            'emergencyType': extracted_vars.get('emergencyType', '')
+            'emergencyType': extracted_vars.get('emergencyType', ''),
+            'start_timestamp': call_data.get('start_timestamp', '')
         }
         
         # Log the data being sent for debugging
@@ -578,6 +626,12 @@ class handler(BaseHTTPRequestHandler):
                 
                 # Extract variables from Retell's call data
                 extracted_vars = extract_variables_v4(call_data)
+                print(f"[SHEETS4 API] INITIAL EXTRACTED VARIABLES: {extracted_vars}")
+
+                # Re-fetch from Retell API if critical fields are missing
+                call_data, extracted_vars = ensure_complete_data(call_data, extracted_vars)
+                analysis = call_data.get("call_analysis", {})
+                call_summary = analysis.get("call_summary", "") or call_summary
                 print(f"[SHEETS4 API] FINAL EXTRACTED VARIABLES: {extracted_vars}")
                 
                 # Get tech data from Adaptive Climate API
