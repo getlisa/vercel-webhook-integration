@@ -53,17 +53,17 @@ def extract_variables_v5(call_data):
         'recording_url': ''
     }
     
+    # recording_url is always at root level of call_data
+    recording_url = call_data.get('recording_url', '')
+    if recording_url:
+        variables['recording_url'] = str(recording_url)
+
     # Method 1: collected_dynamic_variables (primary location)
     collected_vars = call_data.get('collected_dynamic_variables', {})
     if collected_vars and any(collected_vars.values()):
         for key in ['fromNumber', 'customerName', 'serviceAddress', 'callSummary', 'email']:
             if key in collected_vars and collected_vars[key]:
                 variables[key] = str(collected_vars[key])
-        
-        # Get recording_url directly from call_data (it's at root level)
-        recording_url = call_data.get('recording_url', '')
-        if recording_url:
-            variables['recording_url'] = str(recording_url)
     
     # Method 2: Look in call_analysis.custom_analysis_data
     if not any(variables[k] for k in ['fromNumber', 'customerName', 'serviceAddress', 'callSummary']):
@@ -129,7 +129,11 @@ def extract_variables_v5(call_data):
     for key in ['fromNumber', 'customerName', 'serviceAddress', 'callSummary', 'email']:
         if not variables[key] and key in call_data and call_data[key]:
             variables[key] = str(call_data[key])
-    
+
+    # fromNumber fallback: Retell always provides the caller's number as 'from_number'
+    if not variables['fromNumber']:
+        variables['fromNumber'] = call_data.get('from_number', '')
+
     return variables
 
 def get_email_from_api_v5():
