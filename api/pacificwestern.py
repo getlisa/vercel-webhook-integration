@@ -10,6 +10,45 @@ import hashlib
 # Simple file-based deduplication to persist across serverless invocations
 PROCESSED_CALLS_FILE = '/tmp/processed_calls_sheets2.json'
 
+
+def normalize_phone_number(value):
+    """Return a normalized E.164-like phone number when possible."""
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+
+    digits = ''.join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 10:
+        return f'+1{digits}'
+    if len(digits) == 11 and digits.startswith('1'):
+        return f'+{digits}'
+    if 11 <= len(digits) <= 15:
+        return f'+{digits}'
+    return ''
+
+
+def pick_best_from_number(*candidates):
+    """Prefer the first valid phone number, otherwise return an empty string."""
+    for candidate in candidates:
+        normalized = normalize_phone_number(candidate)
+        if normalized:
+            return normalized
+    return ''
+
+
+def normalize_trigger_outbound_call(value):
+    """Normalize triggerOutboundCall to boolean. Defaults to False when uncertain."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    raw = str(value).strip().lower()
+    if raw in ('yes', 'true', '1', 'y'):
+        return True
+    if raw in ('no', 'false', '0', 'n'):
+        return False
+    return False
+
 # SendGrid Configuration for Pacific Western emails
 SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '')
 SENDGRID_FROM_EMAIL = 'developer@justclara.ai'
@@ -63,7 +102,8 @@ def extract_variables_v2(call_data):
         'callSummary': '',
         'email': '',
         'isitEmergency': '',
-        'emergencyType': ''
+        'emergencyType': '',
+        'triggerOutboundCall': ''
     }
     
     def has_values(var_dict):
@@ -89,29 +129,18 @@ def extract_variables_v2(call_data):
 
         return raw
 
-    def is_valid_phone(phone):
-        """Check if phone number looks valid (has at least 10 digits)."""
-        if not phone:
-            return False
-        digits = ''.join(c for c in str(phone) if c.isdigit())
-        return len(digits) >= 10
-
     def finalize(var_dict):
         """Normalize extracted variables before returning."""
         var_dict['isitEmergency'] = normalize_isit_emergency(var_dict.get('isitEmergency', ''))
-        
-        # CRITICAL: Always prefer from_number (actual caller ID) over LLM-extracted phone
-        # LLM might extract partial/invalid phone numbers from conversation
+
+        # Phone priority: Retell's from_number (always correct E.164) wins over LLM-extracted
+        # values; only fall back to LLM extraction if from_number is somehow missing.
         actual_from_number = call_data.get('from_number', '')
-        extracted_from_number = var_dict.get('fromNumber', '')
-        
-        if actual_from_number and is_valid_phone(actual_from_number):
-            # Always use the actual caller ID from Retell
-            var_dict['fromNumber'] = str(actual_from_number)
-        elif not is_valid_phone(extracted_from_number) and actual_from_number:
-            # If extracted phone is invalid but we have from_number, use it
-            var_dict['fromNumber'] = str(actual_from_number)
-        
+        var_dict['fromNumber'] = pick_best_from_number(
+            actual_from_number,
+            var_dict.get('fromNumber', ''),
+        )
+
         return var_dict
     
     # Method 1: collected_dynamic_variables (primary location)
@@ -153,7 +182,18 @@ def extract_variables_v2(call_data):
                 collected_vars.get('issue_description', '') or
                 ''
             )
-        
+
+        # triggerOutboundCall may arrive under several names depending on how
+        # the LLM tool was wired: as a standalone variable, via set_ prefix,
+        # or nested inside extract_variables' dict.
+        if not variables['triggerOutboundCall']:
+            variables['triggerOutboundCall'] = str(
+                collected_vars.get('triggerOutboundCall', '') or
+                collected_vars.get('trigger_outbound_call', '') or
+                collected_vars.get('set_trigger_outbound_call', '') or
+                ''
+            )
+
         # If we have good data from collected_vars, return it
         if has_values(variables):
             return finalize(variables)
@@ -225,6 +265,15 @@ def extract_variables_v2(call_data):
                 custom_data.get('emergency_type', '') or
                 custom_data.get('service_type', '') or
                 custom_data.get('issue_type', '')
+            )
+
+        # Post-call analysis writes triggerOutboundCall directly when defined
+        # on the agent's post_call_analysis_data schema.
+        if not variables['triggerOutboundCall']:
+            variables['triggerOutboundCall'] = str(
+                custom_data.get('triggerOutboundCall', '') or
+                custom_data.get('trigger_outbound_call', '') or
+                custom_data.get('set_trigger_outbound_call', '')
             )
 
         if has_values(variables):
@@ -638,6 +687,20 @@ def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
         collected_vars = call_data.get('collected_dynamic_variables', {})
         rate_approved = collected_vars.get('rateApproved', '')
         call_type = collected_vars.get('callType', '')
+
+        # triggerOutboundCall is authoritative: prefer the extractor's value
+        # (which already consulted collected_vars + post-call analysis), then
+        # fall back to either source. Always coerce to a strict boolean so the
+        # downstream Apps Script gets true/false.
+        custom_analysis = call_data.get('call_analysis', {}).get('custom_analysis_data', {})
+        trigger_raw = (
+            extracted_vars.get('triggerOutboundCall')
+            or collected_vars.get('triggerOutboundCall')
+            or collected_vars.get('set_trigger_outbound_call')
+            or custom_analysis.get('triggerOutboundCall')
+            or ''
+        )
+        trigger_outbound_call = normalize_trigger_outbound_call(trigger_raw)
         
         sheet_data = {
             'timestamp': datetime.now().isoformat(),
@@ -660,7 +723,10 @@ def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
             'emergencyType': extracted_vars.get('emergencyType', ''),
             # Rate approval and call type from LLM dynamic variables
             'rateApproved': rate_approved,
-            'callType': call_type
+            'callType': call_type,
+            # Mandatory outbound-call trigger. Strict boolean so the Apps Script
+            # can gate the Retell outbound call without string comparisons.
+            'triggerOutboundCall': trigger_outbound_call
         }
         
         # Log the data being sent for debugging
@@ -679,6 +745,7 @@ def send_to_google_sheets_v2(call_data, extracted_vars, call_summary, tech_data)
         print(f"[SHEETS2] emergencyType: '{sheet_data.get('emergencyType')}'")
         print(f"[SHEETS2] rateApproved: '{sheet_data.get('rateApproved')}'")
         print(f"[SHEETS2] callType: '{sheet_data.get('callType')}'")
+        print(f"[SHEETS2] triggerOutboundCall (raw): '{trigger_raw}', normalized: {trigger_outbound_call}")
         print(f"[SHEETS2] Tech data used - email: '{tech_data.get('email', '')}', phone: '{tech_data.get('phone', '')}'")
         
         # Convert to JSON and encode
