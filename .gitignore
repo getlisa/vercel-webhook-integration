@@ -86,3 +86,7 @@ test_*.py
 *_test.py
 test/
 tests/
+.env*
+
+#appscript - for testing purposes only
+appscript/
