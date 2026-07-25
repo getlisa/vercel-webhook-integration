@@ -131,10 +131,6 @@ def extract_variables_v4(call_data):
     analysis = call_data.get('call_analysis', {})
     custom_data = analysis.get('custom_analysis_data', {})
     
-    def has_values(var_dict):
-        """Return True when at least one extracted variable has data."""
-        return any(bool(v) for v in var_dict.values())
-
     def normalize_isit_emergency(value):
         """Normalize emergency flag to TRUE/FALSE strings."""
         if value is None:
@@ -165,55 +161,39 @@ def extract_variables_v4(call_data):
         var_dict['isitEmergency'] = normalize_isit_emergency(var_dict.get('isitEmergency', ''))
         return var_dict
 
-    # Method 1: collected_dynamic_variables (primary location)
-    collected_vars = call_data.get('collected_dynamic_variables', {})
-    if collected_vars and any(collected_vars.values()):
-        matched = False
+    # Fill a variable ONLY if it is still empty. This lets every source backfill
+    # gaps in priority order — no early return that would discard a source we
+    # haven't read yet. (Previously each method returned on the first partial
+    # hit, so e.g. a tool that set only fromNumber+isitEmergency caused the rich
+    # custom_analysis_data — caller_name, address, issue_description — to be
+    # dropped entirely.)
+    def fill(key, value):
+        if not variables.get(key) and value:
+            variables[key] = str(value)
+
+    # Source 1: collected_dynamic_variables (set mid-call; highest priority).
+    collected_vars = call_data.get('collected_dynamic_variables', {}) or {}
+    for key in variables.keys():
+        if collected_vars.get(key):
+            fill(key, collected_vars[key])
+
+    # Source 2: call_analysis.custom_analysis_data (post-call analysis — the
+    # richest source; backfills whatever collected_vars didn't carry).
+    if custom_data:
+        # Direct name matches (e.g. customerName / callSummary when present as-is).
         for key in variables.keys():
-            if key in collected_vars and collected_vars[key]:
-                variables[key] = str(collected_vars[key])
-                matched = True
-        if matched:
-            return finalize(variables)
-    
-    # Method 2: Look in call_analysis.custom_analysis_data
-    if custom_data and any(custom_data.values()):
-        # Direct matches first
-        for key in variables.keys():
-            if key in custom_data and custom_data[key]:
-                variables[key] = str(custom_data[key])
+            if custom_data.get(key):
+                fill(key, custom_data[key])
 
-        # Map common alternate keys used by Retell custom analysis outputs.
-        # If extracted data is not a real phone number, fall back to the actual caller number.
-        actual_from_number = call_data.get('from_number', '')
-        extracted_from_number = (
-            custom_data.get('caller_phone', '') or
-            custom_data.get('phone', '') or
-            variables.get('fromNumber', '')
-        )
-        variables['fromNumber'] = pick_best_from_number(extracted_from_number, actual_from_number)
+        # Alternate keys used by Retell custom analysis outputs.
+        fill('customerName',
+             custom_data.get('caller_name') or custom_data.get('customer_name') or custom_data.get('name'))
+        fill('email',
+             custom_data.get('caller_email') or custom_data.get('customer_email'))
+        fill('callSummary',
+             custom_data.get('issue_description') or custom_data.get('call_summary') or analysis.get('call_summary'))
 
-        if not variables['customerName']:
-            variables['customerName'] = str(
-                custom_data.get('caller_name', '') or
-                custom_data.get('customer_name', '') or
-                custom_data.get('name', '')
-            )
-
-        if not variables['email']:
-            variables['email'] = str(
-                custom_data.get('caller_email', '') or
-                custom_data.get('customer_email', '')
-            )
-
-        if not variables['callSummary']:
-            variables['callSummary'] = str(
-                custom_data.get('issue_description', '') or
-                custom_data.get('call_summary', '') or
-                analysis.get('call_summary', '')
-            )
-
-        # Build service address from parts if a pre-joined address is not present
+        # Build service address from parts if a pre-joined address is not present.
         if not variables['serviceAddress']:
             address_line = (
                 custom_data.get('service_address', '') or
@@ -227,20 +207,14 @@ def extract_variables_v4(call_data):
             variables['serviceAddress'] = ', '.join(parts)
 
         if not variables['isitEmergency']:
-            raw_emergency = (
-                custom_data.get('isEmergency', '') or
-                custom_data.get('is_emergency', '')
-            )
-            variables['isitEmergency'] = normalize_isit_emergency(raw_emergency)
-
-        if not variables['emergencyType']:
-            variables['emergencyType'] = str(
-                custom_data.get('emergency_type', '') or
-                custom_data.get('service_type', '') or
-                custom_data.get('issue_type', '')
+            variables['isitEmergency'] = normalize_isit_emergency(
+                custom_data.get('isEmergency', '') or custom_data.get('is_emergency', '')
             )
 
-        # Adaptive is HVAC-focused; infer emergency type if still missing
+        fill('emergencyType',
+             custom_data.get('emergency_type') or custom_data.get('service_type') or custom_data.get('issue_type'))
+
+        # Adaptive is HVAC-focused; infer emergency type if still missing.
         if not variables['emergencyType']:
             issue_text = (
                 str(custom_data.get('issue_description', '')) + ' ' +
@@ -249,25 +223,19 @@ def extract_variables_v4(call_data):
             if any(token in issue_text for token in ['hvac', 'air conditioner', 'ac', 'furnace', 'heating', 'cooling']):
                 variables['emergencyType'] = 'HVAC'
 
-        if has_values(variables):
-            return finalize(variables)
-    
-    # Method 3: Look for extract_variables tool call result in transcript_with_tool_calls
-    transcript_with_tools = call_data.get('transcript_with_tool_calls', [])
+    # Source 3: extract_variables tool call result in transcript_with_tool_calls.
+    transcript_with_tools = call_data.get('transcript_with_tool_calls', []) or []
     if transcript_with_tools:
-        # Find extract_variables tool call
         extract_tool_id = None
         for entry in transcript_with_tools:
-            if (entry.get('role') == 'tool_call_invocation' and 
-                entry.get('name') == 'extract_variables'):
+            if (entry.get('role') == 'tool_call_invocation' and
+                    entry.get('name') == 'extract_variables'):
                 extract_tool_id = entry.get('tool_call_id')
                 break
-        
-        # Find the corresponding result
         if extract_tool_id:
             for entry in transcript_with_tools:
-                if (entry.get('role') == 'tool_call_result' and 
-                    entry.get('tool_call_id') == extract_tool_id):
+                if (entry.get('role') == 'tool_call_result' and
+                        entry.get('tool_call_id') == extract_tool_id):
                     content = entry.get('content', '')
                     if content:
                         try:
@@ -275,14 +243,12 @@ def extract_variables_v4(call_data):
                             if isinstance(result, dict):
                                 source_vars = result.get('variables', result)
                                 for key in variables.keys():
-                                    if key in source_vars and source_vars[key]:
-                                        variables[key] = str(source_vars[key])
-                                if has_values(variables):
-                                    return finalize(variables)
+                                    if source_vars.get(key):
+                                        fill(key, source_vars[key])
                         except (json.JSONDecodeError, TypeError):
-                            continue
-    
-    # Method 4: Look for any tool_call_result with variables (broader search)
+                            pass
+
+    # Source 4: any tool_call_result carrying our keys (broader backfill).
     if transcript_with_tools:
         for entry in transcript_with_tools:
             if entry.get('role') == 'tool_call_result':
@@ -291,29 +257,20 @@ def extract_variables_v4(call_data):
                     try:
                         result = json.loads(content)
                         if isinstance(result, dict):
-                            found_vars = False
                             for key in variables.keys():
-                                if key in result and result[key]:
-                                    variables[key] = str(result[key])
-                                    found_vars = True
-                            if found_vars:
-                                return finalize(variables)
+                                if result.get(key):
+                                    fill(key, result[key])
                     except (json.JSONDecodeError, TypeError):
-                        continue
-    
-    # Method 5: Direct fields in call_data (last resort)
-    for key in variables.keys():
-        if key in call_data and call_data[key]:
-            variables[key] = str(call_data[key])
+                        pass
 
-    # Final fallbacks from top-level Retell fields
-    variables['fromNumber'] = pick_best_from_number(
-        variables.get('fromNumber', ''),
-        call_data.get('from_number', '')
-    )
+    # Source 5: direct fields on call_data (last resort).
+    for key in variables.keys():
+        if call_data.get(key):
+            fill(key, call_data[key])
+
     if not variables['callSummary']:
         variables['callSummary'] = str(analysis.get('call_summary', ''))
-    
+
     return finalize(variables)
 
 def get_tech_data_from_adaptive_climate_api():
@@ -455,6 +412,9 @@ def send_to_google_sheets_v4(call_data, extracted_vars, call_summary, tech_data)
         sheet_data = {
             'timestamp': datetime.now().isoformat(),
             'call_id': call_data.get('call_id', ''),
+            # WS-4: pass Retell call direction so GAS can also guard against
+            # self-inserted outbound rows on the primary path.
+            'direction': call_data.get('direction', ''),
             'agent_name': call_data.get('agent_name', ''),
             'call_duration': call_data.get('duration_ms', 0),
             'user_sentiment': call_data.get('call_analysis', {}).get('user_sentiment', ''),
@@ -648,6 +608,20 @@ class handler(BaseHTTPRequestHandler):
             
             # Only process call_analyzed events
             if event_type == "call_analyzed":
+                # WS-4: escalation-created (outbound) calls must never create a
+                # sheet row. Skip them at the source so they never reach GAS
+                # (saves the tech-API + extraction work too). direction is
+                # 'inbound'/'outbound' on the Retell call object.
+                if str(call_data.get("direction", "")).lower() == "outbound":
+                    print(f"[SHEETS4] Skipping OUTBOUND (escalation) call {call_id} — not forwarded to sheet")
+                    response_data = {"status": "skipped", "reason": "outbound_call", "call_id": call_id}
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps(response_data).encode())
+                    return
+
                 # Check for duplicate processing
                 if self.is_duplicate_call(call_data):
                     print(f"[SHEETS4] Duplicate call detected, skipping processing for {call_id}")
