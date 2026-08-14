@@ -36,6 +36,32 @@ def pick_best_from_number(*candidates):
 
 CRITICAL_FIELDS = ['isitEmergency', 'customerName', 'fromNumber']
 
+# Every spelling a source may use for each canonical field, in priority order.
+# Retell tool variables are renamed from time to time (isitEmergency -> is_emergency
+# in June 2026 silently stopped emergency dispatch for two weeks), so extraction must
+# never depend on a single spelling.
+FIELD_ALIASES = {
+    'fromNumber':     ('fromNumber', 'from_number'),
+    'customerName':   ('customerName', 'customer_name', 'caller_name', 'name'),
+    'serviceAddress': ('serviceAddress', 'service_address', 'caller_address',
+                       'address', 'address_line1'),
+    'callSummary':    ('callSummary', 'call_summary', 'issue_description'),
+    'email':          ('email', 'caller_email', 'customer_email'),
+    'isitEmergency':  ('isitEmergency', 'isEmergency', 'is_emergency', 'emergency'),
+    'emergencyType':  ('emergencyType', 'emergency_type', 'service_type',
+                       'issue_type', 'serviceLineName'),
+}
+
+def lookup_alias(source, field):
+    """Return the first non-empty value for `field` under any of its known spellings."""
+    if not isinstance(source, dict):
+        return None
+    for key in FIELD_ALIASES.get(field, (field,)):
+        value = source.get(key)
+        if value is not None and value != '':
+            return value
+    return None
+
 def fetch_call_from_retell(call_id, api_key):
     """Fetch the full call object from the Retell API."""
     url = f"https://api.retellai.com/v2/get-call/{call_id}"
@@ -55,6 +81,14 @@ def ensure_complete_data(call_data, extracted_vars):
     """
     missing = [f for f in CRITICAL_FIELDS if not extracted_vars.get(f)]
     if not missing:
+        return call_data, extracted_vars
+
+    # Only retry when the post-call analysis genuinely has not landed yet. Retell does
+    # not populate custom analysis for calls that never connected, and a blank
+    # isitEmergency is a legitimate outcome on a non-emergency call — retrying those
+    # burned 18s per request and always returned the same result.
+    if (call_data.get('call_analysis') or {}).get('custom_analysis_data'):
+        print(f"[RETRY] Skipped: analysis already present, {missing} legitimately empty")
         return call_data, extracted_vars
 
     api_key = os.environ.get('RETELL_API_KEY', 'key_69831f5ea37c7733b21533331182')
@@ -133,10 +167,6 @@ def extract_variables_v3(call_data):
     analysis = call_data.get('call_analysis', {})
     custom_data = analysis.get('custom_analysis_data', {})
     
-    def has_values(var_dict):
-        """Return True when at least one extracted variable has data."""
-        return any(bool(v) for v in var_dict.values())
-
     def normalize_isit_emergency(value):
         """Normalize emergency flag to TRUE/FALSE strings."""
         if value is None:
@@ -167,55 +197,59 @@ def extract_variables_v3(call_data):
         var_dict['isitEmergency'] = normalize_isit_emergency(var_dict.get('isitEmergency', ''))
         return var_dict
     
-    # Method 1: collected_dynamic_variables (primary location)
-    collected_vars = call_data.get('collected_dynamic_variables', {})
-    if collected_vars and any(collected_vars.values()):
-        matched = False
-        for key in variables.keys():
-            if key in collected_vars and collected_vars[key]:
-                variables[key] = str(collected_vars[key])
-                matched = True
-        if matched:
-            return finalize(variables)
-    
-    # Method 2: Look in call_analysis.custom_analysis_data with enhanced fallback mappings
-    if custom_data and any(custom_data.values()):
-        # Direct matches first
-        for key in variables.keys():
-            if key in custom_data and custom_data[key]:
-                variables[key] = str(custom_data[key])
+    # Sources are consulted in priority order and each one only fills gaps left by the
+    # previous. There is deliberately NO early return: a source that supplies some
+    # fields must never stop a later source supplying the rest. Previously Method 1
+    # returned as soon as it matched fromNumber/customerName/serviceAddress, which
+    # discarded the emergency flag that only the post-call analysis knew how to
+    # provide once the Retell tool renamed isitEmergency -> is_emergency.
+    emergency_source = 'none'
 
-        # Map common alternate keys used by Retell custom analysis outputs.
-        # If extracted data is not a real phone number, fall back to the actual caller number.
-        actual_from_number = call_data.get('from_number', '')
+    def fill(key, value):
+        if not variables.get(key) and value:
+            variables[key] = str(value)
+
+    def absorb(source, label):
+        """Fill still-empty fields from `source`, accepting every known spelling."""
+        nonlocal emergency_source
+        if not isinstance(source, dict) or not source:
+            return
+        for key in variables:
+            if key == 'isitEmergency':
+                continue  # handled below; a literal False must not be treated as empty
+            if key == 'fromNumber' and source is not collected_vars:
+                continue  # phone precedence is resolved explicitly below, not by alias order
+            fill(key, lookup_alias(source, key))
+        if not variables['isitEmergency']:
+            normalized = normalize_isit_emergency(lookup_alias(source, 'isitEmergency'))
+            if normalized:
+                variables['isitEmergency'] = normalized
+                emergency_source = label
+
+    # Source 1: collected_dynamic_variables — written mid-call by extraction tools.
+    collected_vars = call_data.get('collected_dynamic_variables') or {}
+    absorb(collected_vars, 'collected_dynamic_variables')
+
+    # Source 2: call_analysis.custom_analysis_data — post-call analysis, richest source.
+    absorb(custom_data, 'custom_analysis_data')
+
+    if custom_data:
+        # Phone precedence, most deliberate source first: the number the agent captured
+        # mid-call, then the callback number the caller stated, and only then the raw
+        # caller ID. The technician is transferred to this number, so a stated callback
+        # must outrank the line the customer happened to dial from.
         extracted_from_number = (
+            variables.get('fromNumber', '') or
             custom_data.get('caller_phone', '') or
             custom_data.get('phone', '') or
-            variables.get('fromNumber', '')
+            custom_data.get('fromNumber', '')
         )
-        variables['fromNumber'] = pick_best_from_number(extracted_from_number, actual_from_number)
+        variables['fromNumber'] = pick_best_from_number(
+            extracted_from_number,
+            call_data.get('from_number', '')
+        )
 
-        if not variables['customerName']:
-            variables['customerName'] = str(
-                custom_data.get('caller_name', '') or
-                custom_data.get('customer_name', '') or
-                custom_data.get('name', '')
-            )
-
-        if not variables['email']:
-            variables['email'] = str(
-                custom_data.get('caller_email', '') or
-                custom_data.get('customer_email', '')
-            )
-
-        if not variables['callSummary']:
-            variables['callSummary'] = str(
-                custom_data.get('issue_description', '') or
-                custom_data.get('call_summary', '') or
-                analysis.get('call_summary', '')
-            )
-
-        # Build service address from parts if a pre-joined address is not present
+        # Build a service address from parts only when no pre-joined address exists.
         if not variables['serviceAddress']:
             address_line = (
                 custom_data.get('service_address', '') or
@@ -223,92 +257,59 @@ def extract_variables_v3(call_data):
                 custom_data.get('caller_address', '') or
                 custom_data.get('address_line1', '')
             )
-            city = custom_data.get('city', '')
-            state = custom_data.get('state', '')
-            postal = custom_data.get('postal_code', '')
-            parts = [str(p).strip() for p in [address_line, city, state, postal] if p]
+            parts = [
+                str(p).strip() for p in [
+                    address_line,
+                    custom_data.get('city', ''),
+                    custom_data.get('state', ''),
+                    custom_data.get('postal_code', ''),
+                ] if p
+            ]
             variables['serviceAddress'] = ', '.join(parts)
 
-        if not variables['isitEmergency']:
-            raw_emergency = (
-                custom_data.get('isEmergency', '') or
-                custom_data.get('is_emergency', '') or
-                custom_data.get('isitEmergency', '')
-            )
-            variables['isitEmergency'] = normalize_isit_emergency(raw_emergency)
+    transcript_with_tools = call_data.get('transcript_with_tool_calls') or []
 
-        if not variables['emergencyType']:
-            variables['emergencyType'] = str(
-                custom_data.get('emergency_type', '') or
-                custom_data.get('service_type', '') or
-                custom_data.get('issue_type', '')
-            )
+    def absorb_tool_result(entry, label):
+        content = entry.get('content', '')
+        if not content:
+            return
+        try:
+            result = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(result, dict):
+            return
+        nested = result.get('variables')
+        absorb(nested if isinstance(nested, dict) else result, label)
 
-        if has_values(variables):
-            return finalize(variables)
-    
-    # Method 3: Look for extract_variables tool call result in transcript_with_tool_calls
-    transcript_with_tools = call_data.get('transcript_with_tool_calls', [])
-    if transcript_with_tools:
-        # Find extract_variables tool call
-        extract_tool_id = None
-        for entry in transcript_with_tools:
-            if (entry.get('role') == 'tool_call_invocation' and 
+    # Source 3: the extract_variables tool result specifically, if the agent called it.
+    extract_tool_id = None
+    for entry in transcript_with_tools:
+        if (entry.get('role') == 'tool_call_invocation' and
                 entry.get('name') == 'extract_variables'):
-                extract_tool_id = entry.get('tool_call_id')
-                break
-        
-        # Find the corresponding result
-        if extract_tool_id:
-            for entry in transcript_with_tools:
-                if (entry.get('role') == 'tool_call_result' and 
-                    entry.get('tool_call_id') == extract_tool_id):
-                    content = entry.get('content', '')
-                    if content:
-                        try:
-                            result = json.loads(content)
-                            if isinstance(result, dict):
-                                source_vars = result.get('variables', result)
-                                for key in variables.keys():
-                                    if key in source_vars and source_vars[key]:
-                                        variables[key] = str(source_vars[key])
-                                if has_values(variables):
-                                    return finalize(variables)
-                        except (json.JSONDecodeError, TypeError):
-                            continue
-    
-    # Method 4: Look for any tool_call_result with variables (broader search)
-    if transcript_with_tools:
+            extract_tool_id = entry.get('tool_call_id')
+            break
+    if extract_tool_id:
         for entry in transcript_with_tools:
-            if entry.get('role') == 'tool_call_result':
-                content = entry.get('content', '')
-                if content:
-                    try:
-                        result = json.loads(content)
-                        if isinstance(result, dict):
-                            found_vars = False
-                            for key in variables.keys():
-                                if key in result and result[key]:
-                                    variables[key] = str(result[key])
-                                    found_vars = True
-                            if found_vars:
-                                return finalize(variables)
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-    
-    # Method 5: Direct fields in call_data (last resort)
-    for key in variables.keys():
-        if key in call_data and call_data[key]:
-            variables[key] = str(call_data[key])
+            if (entry.get('role') == 'tool_call_result' and
+                    entry.get('tool_call_id') == extract_tool_id):
+                absorb_tool_result(entry, 'extract_variables_tool')
 
-    # Final fallbacks from top-level Retell fields
-    variables['fromNumber'] = pick_best_from_number(
-        variables.get('fromNumber', ''),
-        call_data.get('from_number', '')
-    )
+    # Source 4: any other tool result carrying one of our fields.
+    for entry in transcript_with_tools:
+        if entry.get('role') == 'tool_call_result':
+            absorb_tool_result(entry, 'tool_call_result')
+
+    # Source 5: direct fields on the call object (last resort).
+    absorb(call_data, 'call_data')
+
     if not variables['callSummary']:
         variables['callSummary'] = str(analysis.get('call_summary', ''))
-    
+
+    print(f"[SHEETS3] emergency resolved via {emergency_source} -> "
+          f"isitEmergency={variables['isitEmergency']!r} "
+          f"emergencyType={variables['emergencyType']!r}")
+
     return finalize(variables)
 
 def get_tech_data_from_api(emergency_type=''):

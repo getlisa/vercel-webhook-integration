@@ -49,6 +49,30 @@ def forward_to_api_gateway(body_str, signature_header):
         # Swallow errors — forward failures must never block the main webhook response
         print(f"[API_GATEWAY] Error forwarding webhook: {e}")
 
+# Every spelling a source may use for each canonical field, in priority order. Retell
+# tool variables get renamed (isitEmergency -> is_emergency, June 2026), so extraction
+# must never depend on a single spelling. Mirrors FIELD_ALIASES in api/braconier.py.
+FIELD_ALIASES = {
+    'fromNumber':     ('fromNumber', 'from_number'),
+    'customerName':   ('customerName', 'customer_name', 'caller_name', 'name'),
+    'serviceAddress': ('serviceAddress', 'service_address', 'caller_address', 'address'),
+    'callSummary':    ('callSummary', 'call_summary', 'issue_description'),
+    'email':          ('email', 'caller_email', 'customer_email'),
+    'isitEmergency':  ('isitEmergency', 'isEmergency', 'is_emergency', 'emergency'),
+    'emergencyType':  ('emergencyType', 'emergency_type', 'service_type',
+                       'issue_type', 'serviceLineName'),
+}
+
+def lookup_alias(source, field):
+    """Return the first non-empty value for `field` under any of its known spellings."""
+    if not isinstance(source, dict):
+        return None
+    for key in FIELD_ALIASES.get(field, (field,)):
+        value = source.get(key)
+        if value is not None and value != '':
+            return value
+    return None
+
 def extract_variables(call_data):
     """Extract dynamic variables from Retell call data"""
     variables = {
@@ -77,8 +101,14 @@ def extract_variables(call_data):
     collected = call_data.get('collected_dynamic_variables', {})
     if collected:
         for key in variables:
-            if key in collected and collected[key]:
-                variables[key] = str(collected[key])
+            if key == 'isitEmergency':
+                continue  # handled below; a literal False must not be treated as empty
+            value = lookup_alias(collected, key)
+            if value:
+                variables[key] = str(value)
+        variables['isitEmergency'] = normalize_emergency(
+            lookup_alias(collected, 'isitEmergency')
+        )
     
     # Method 2: call_analysis.custom_analysis_data
     analysis = call_data.get('call_analysis', {})
@@ -93,9 +123,9 @@ def extract_variables(call_data):
         if not variables['callSummary']:
             variables['callSummary'] = str(custom.get('issue_description', '') or analysis.get('call_summary', ''))
         if not variables['isitEmergency']:
-            variables['isitEmergency'] = normalize_emergency(custom.get('isitEmergency', '') or custom.get('isEmergency', ''))
+            variables['isitEmergency'] = normalize_emergency(lookup_alias(custom, 'isitEmergency'))
         if not variables['emergencyType']:
-            variables['emergencyType'] = str(custom.get('emergencyType', '') or custom.get('emergency_type', ''))
+            variables['emergencyType'] = str(lookup_alias(custom, 'emergencyType') or '')
     
     # Fallback for call summary
     if not variables['callSummary']:
