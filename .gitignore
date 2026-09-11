@@ -90,3 +90,7 @@ tests/
 
 #appscript - for testing purposes only
 appscript/
+google-sheet/
+retell/
+
+.claude/
