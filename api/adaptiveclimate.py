@@ -57,7 +57,9 @@ def ensure_complete_data(call_data, extracted_vars):
     if not missing:
         return call_data, extracted_vars
 
-    api_key = os.environ.get('RETELL_API_KEY', '***REMOVED***')
+    # os.environ.get(name, default) returns '' for a variable that exists with an empty
+    # value, so the previous form authenticated with nothing.
+    api_key = os.environ.get('RETELL_API_KEY', '').strip() or '***REMOVED***'
 
     call_id = call_data.get('call_id', '')
     print(f"[RETRY] Missing critical fields {missing} for {call_id}, waiting 3s then re-fetching...")
