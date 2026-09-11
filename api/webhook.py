@@ -61,6 +61,8 @@ FIELD_ALIASES = {
     'isitEmergency':  ('isitEmergency', 'isEmergency', 'is_emergency', 'emergency'),
     'emergencyType':  ('emergencyType', 'emergency_type', 'service_type',
                        'issue_type', 'serviceLineName'),
+    'isExistingCustomer': ('isExistingCustomer', 'is_existing_customer',
+                           'existing_customer', 'customerVerified'),
 }
 
 def lookup_alias(source, field):
