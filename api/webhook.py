@@ -63,6 +63,7 @@ FIELD_ALIASES = {
                        'issue_type', 'serviceLineName'),
     'isExistingCustomer': ('isExistingCustomer', 'is_existing_customer',
                            'existing_customer', 'customerVerified'),
+    'intakeComplete': ('intakeComplete', 'intake_complete', 'intake_completed'),
 }
 
 def lookup_alias(source, field):
