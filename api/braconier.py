@@ -5,11 +5,25 @@ import time
 from datetime import datetime
 import urllib.request
 import urllib.parse
+import urllib.error
 import ssl
 import hashlib
 
 # Simple file-based deduplication to persist across serverless invocations
 PROCESSED_CALLS_FILE = '/tmp/processed_calls_sheets3.json'
+
+# Used when RETELL_API_KEY is unset or blank. Kept as a literal because a missing key
+# turns every re-fetch below into a silent no-op.
+RETELL_API_KEY_FALLBACK = 'key_69831f5ea37c7733b21533331182'
+
+
+def retell_api_key():
+    """The Retell key to authenticate with, ignoring an env var that is set but empty.
+
+    os.environ.get(name, default) returns '' for a variable that exists with an empty
+    value, so the previous form authenticated with nothing and every retry failed.
+    """
+    return os.environ.get('RETELL_API_KEY', '').strip() or RETELL_API_KEY_FALLBACK
 
 def normalize_phone_number(value):
     """Return a normalized E.164-like phone number when possible."""
@@ -45,7 +59,8 @@ FIELD_ALIASES = {
     'customerName':   ('customerName', 'customer_name', 'caller_name', 'name'),
     'serviceAddress': ('serviceAddress', 'service_address', 'caller_address',
                        'address', 'address_line1'),
-    'callSummary':    ('callSummary', 'call_summary', 'issue_description'),
+    'callSummary':    ('callSummary', 'call_summary', 'issue_description',
+                       'issueDescription'),
     'email':          ('email', 'caller_email', 'customer_email'),
     'isitEmergency':  ('isitEmergency', 'isEmergency', 'is_emergency', 'emergency'),
     'emergencyType':  ('emergencyType', 'emergency_type', 'service_type',
@@ -63,6 +78,18 @@ FIELD_ALIASES = {
     'stLocationName': ('st_location_name',),
     'stLocationId':   ('st_location_id', 'locationId'),
 }
+
+def is_dispatchable(extracted_vars):
+    """True only when a technician may be contacted for this call.
+
+    Three conditions, and the same three everywhere: an after-hours emergency, raised by
+    a caller verified against a ServiceTrade customer account, who said WHERE the work is
+    and WHAT is wrong. Anything short of that is a dispatch-team follow-up.
+    """
+    return all(
+        str(extracted_vars.get(field, '')).upper() == 'TRUE'
+        for field in ('isitEmergency', 'isExistingCustomer', 'intakeComplete')
+    )
 
 def lookup_alias(source, field):
     """Return the first non-empty value for `field` under any of its known spellings."""
@@ -103,7 +130,7 @@ def ensure_complete_data(call_data, extracted_vars):
         print(f"[RETRY] Skipped: analysis already present, {missing} legitimately empty")
         return call_data, extracted_vars
 
-    api_key = os.environ.get('RETELL_API_KEY', 'key_69831f5ea37c7733b21533331182')
+    api_key = retell_api_key()
 
     call_id = call_data.get('call_id', '')
     print(f"[RETRY] Missing critical fields {missing} for {call_id}, waiting 3s then re-fetching...")
@@ -120,6 +147,13 @@ def ensure_complete_data(call_data, extracted_vars):
                 return fresh, fresh_vars
             call_data = fresh
             extracted_vars = fresh_vars
+        except urllib.error.HTTPError as e:
+            # A rejected key is not a race with the analyser finishing. Retrying it costs
+            # another 15s of the invocation and cannot succeed.
+            print(f"[RETRY] Attempt {attempt} failed: HTTP {e.code} from Retell")
+            if e.code in (401, 403):
+                print("[RETRY] Retell rejected the API key - abandoning re-fetch")
+                break
         except Exception as e:
             print(f"[RETRY] Attempt {attempt} failed: {e}")
 
@@ -514,10 +548,6 @@ def send_to_google_sheets_v3(call_data, extracted_vars, call_summary, tech_data)
         # Get transcript
         transcript = call_data.get('transcript', '')
 
-        is_emergency_flag = str(extracted_vars.get('isitEmergency', '')).upper() == 'TRUE'
-        is_customer_flag = str(extracted_vars.get('isExistingCustomer', '')).upper() == 'TRUE'
-        intake_flag = str(extracted_vars.get('intakeComplete', '')).upper() == 'TRUE'
-        
         # Prepare data for Google Sheets matching exact header structure:
         # Timestamp, Call ID, Agent Name, Duration (ms), Sentiment, Successful, Call Summary, 
         # From Number, Customer Name, Service Address, Email, Phone, Is Emergency, Emergency Type, 
@@ -545,10 +575,11 @@ def send_to_google_sheets_v3(call_data, extracted_vars, call_summary, tech_data)
             'st_location_name': extracted_vars.get('stLocationName', ''),
             'st_location_id': extracted_vars.get('stLocationId', ''),
             'transcript': transcript,
-            # Dispatch needs BOTH an emergency and a verified customer. This used to be a
-            # hard True, so every row armed the technician-calling automation — including
-            # non-emergencies and callers with no ServiceTrade account at all.
-            'make_call': is_emergency_flag and is_customer_flag and intake_flag,
+            # This used to be a hard True, so every row armed the technician-calling
+            # automation — including non-emergencies and callers with no ServiceTrade
+            # account at all. is_dispatchable() is the single rule; the on-call lookup
+            # in the handler reads the same one.
+            'make_call': is_dispatchable(extracted_vars),
             'response_call_id_1': '',
             'response_call_id_2': '',
             'response_call_id_3': '',
@@ -767,21 +798,29 @@ class handler(BaseHTTPRequestHandler):
                 call_summary = analysis.get("call_summary", "") or call_summary
                 print(f"[SHEETS3 API] FINAL EXTRACTED VARIABLES: {extracted_vars}")
                 
-                # Get tech data from external APIs based on emergency type
-                try:
-                    emergency_type = extracted_vars.get('emergencyType', '')
-                    print(f"[SHEETS3] Emergency type detected: '{emergency_type}'")
-                    print(f"[SHEETS3] Calling get_tech_data_from_api() with emergency_type='{emergency_type}'...")
-                    tech_data = get_tech_data_from_api(emergency_type)
-                    if not isinstance(tech_data, dict):
+                # Look up the on-call technician only for a call that may actually reach
+                # one. get_tech_data_from_api defaults an empty emergency_type to HVAC, so
+                # an 11-second wrong number used to land the on-call technician's address
+                # and mobile number in columns K and L of a non-emergency row - and column
+                # L is the number makeOutboundCall dials.
+                tech_data = {'name': '', 'email': '', 'phone': ''}
+                if is_dispatchable(extracted_vars):
+                    try:
+                        emergency_type = extracted_vars.get('emergencyType', '')
+                        print(f"[SHEETS3] Emergency type detected: '{emergency_type}'")
+                        print(f"[SHEETS3] Calling get_tech_data_from_api() with emergency_type='{emergency_type}'...")
+                        fetched = get_tech_data_from_api(emergency_type)
+                        if isinstance(fetched, dict):
+                            tech_data = fetched
+                        print(f"[SHEETS3] Tech data from API: {tech_data}")
+                        print(f"[SHEETS3] Tech data name: '{tech_data.get('name', '')}'")
+                        print(f"[SHEETS3] Tech data email: '{tech_data.get('email', '')}'")
+                        print(f"[SHEETS3] Tech data phone: '{tech_data.get('phone', '')}'")
+                    except Exception as e:
+                        print(f"[SHEETS3] Error getting tech data: {e}")
                         tech_data = {'name': '', 'email': '', 'phone': ''}
-                    print(f"[SHEETS3] Tech data from API: {tech_data}")
-                    print(f"[SHEETS3] Tech data name: '{tech_data.get('name', '')}'")
-                    print(f"[SHEETS3] Tech data email: '{tech_data.get('email', '')}'")
-                    print(f"[SHEETS3] Tech data phone: '{tech_data.get('phone', '')}'")
-                except Exception as e:
-                    print(f"[SHEETS3] Error getting tech data: {e}")
-                    tech_data = {'name': '', 'email': '', 'phone': ''}
+                else:
+                    print("[SHEETS3] Not dispatchable - skipping on-call technician lookup")
                 
                 # Log successful extractions
                 non_empty_vars = {k: v for k, v in extracted_vars.items() if v}
