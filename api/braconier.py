@@ -50,6 +50,13 @@ FIELD_ALIASES = {
     'isitEmergency':  ('isitEmergency', 'isEmergency', 'is_emergency', 'emergency'),
     'emergencyType':  ('emergencyType', 'emergency_type', 'service_type',
                        'issue_type', 'serviceLineName'),
+    'isExistingCustomer': ('isExistingCustomer', 'is_existing_customer',
+                           'existing_customer', 'customerVerified'),
+    # The matched ServiceTrade record, as distinct from what the caller said. These ride to
+    # the sheet so the dispatch call can brief the technician with the site on file.
+    'stCompanyName':  ('st_company_name', 'companyName'),
+    'stLocationName': ('st_location_name',),
+    'stLocationId':   ('st_location_id', 'locationId'),
 }
 
 def lookup_alias(source, field):
@@ -162,7 +169,11 @@ def extract_variables_v3(call_data):
         'callSummary': '',
         'email': '',
         'isitEmergency': '',
-        'emergencyType': ''
+        'emergencyType': '',
+        'isExistingCustomer': '',
+        'stCompanyName': '',
+        'stLocationName': '',
+        'stLocationId': ''
     }
     analysis = call_data.get('call_analysis', {})
     custom_data = analysis.get('custom_analysis_data', {})
@@ -215,7 +226,7 @@ def extract_variables_v3(call_data):
         if not isinstance(source, dict) or not source:
             return
         for key in variables:
-            if key == 'isitEmergency':
+            if key in ('isitEmergency', 'isExistingCustomer'):
                 continue  # handled below; a literal False must not be treated as empty
             if key == 'fromNumber' and source is not collected_vars:
                 continue  # phone precedence is resolved explicitly below, not by alias order
@@ -225,6 +236,12 @@ def extract_variables_v3(call_data):
             if normalized:
                 variables['isitEmergency'] = normalized
                 emergency_source = label
+        # Same TRUE/FALSE normalization, same reason: a literal False is a real verdict
+        # ("we looked, they are not a customer") and must not read as "not yet known".
+        if not variables['isExistingCustomer']:
+            verified = normalize_isit_emergency(lookup_alias(source, 'isExistingCustomer'))
+            if verified:
+                variables['isExistingCustomer'] = verified
 
     # Source 1: collected_dynamic_variables — written mid-call by extraction tools.
     collected_vars = call_data.get('collected_dynamic_variables') or {}
@@ -484,6 +501,9 @@ def send_to_google_sheets_v3(call_data, extracted_vars, call_summary, tech_data)
         
         # Get transcript
         transcript = call_data.get('transcript', '')
+
+        is_emergency_flag = str(extracted_vars.get('isitEmergency', '')).upper() == 'TRUE'
+        is_customer_flag = str(extracted_vars.get('isExistingCustomer', '')).upper() == 'TRUE'
         
         # Prepare data for Google Sheets matching exact header structure:
         # Timestamp, Call ID, Agent Name, Duration (ms), Sentiment, Successful, Call Summary, 
@@ -506,8 +526,15 @@ def send_to_google_sheets_v3(call_data, extracted_vars, call_summary, tech_data)
             'phone': tech_data.get('phone', ''),  # Tech phone from API
             'is_emergency': extracted_vars.get('isitEmergency', ''),
             'emergency_type': extracted_vars.get('emergencyType', ''),
+            'is_existing_customer': extracted_vars.get('isExistingCustomer', ''),
+            'st_company_name': extracted_vars.get('stCompanyName', ''),
+            'st_location_name': extracted_vars.get('stLocationName', ''),
+            'st_location_id': extracted_vars.get('stLocationId', ''),
             'transcript': transcript,
-            'make_call': True,  # Always set to True initially
+            # Dispatch needs BOTH an emergency and a verified customer. This used to be a
+            # hard True, so every row armed the technician-calling automation — including
+            # non-emergencies and callers with no ServiceTrade account at all.
+            'make_call': is_emergency_flag and is_customer_flag,
             'response_call_id_1': '',
             'response_call_id_2': '',
             'response_call_id_3': '',
@@ -525,6 +552,7 @@ def send_to_google_sheets_v3(call_data, extracted_vars, call_summary, tech_data)
         print(f"[SHEETS3] email: '{sheet_data.get('email')}'")
         print(f"[SHEETS3] phone: '{sheet_data.get('phone')}'")
         print(f"[SHEETS3] is_emergency: '{sheet_data.get('is_emergency')}'")
+        print(f"[SHEETS3] is_existing_customer: '{sheet_data.get('is_existing_customer')}'")
         print(f"[SHEETS3] emergency_type: '{sheet_data.get('emergency_type')}'")
         print(f"[SHEETS3] make_call: '{sheet_data.get('make_call')}'")
         print(f"[SHEETS3] is_email_sent: '{sheet_data.get('is_email_sent')}'")
