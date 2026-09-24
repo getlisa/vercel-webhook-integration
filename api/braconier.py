@@ -65,8 +65,15 @@ FIELD_ALIASES = {
     'isitEmergency':  ('isitEmergency', 'isEmergency', 'is_emergency', 'emergency'),
     'emergencyType':  ('emergencyType', 'emergency_type', 'service_type',
                        'issue_type', 'serviceLineName'),
-    'isExistingCustomer': ('isExistingCustomer', 'is_existing_customer',
-                           'existing_customer', 'customerVerified'),
+    # st_customer_verified is the lookup's own verdict, carried on the call by the inbound
+    # webhook and by the st_customer tool's response mapping. `customerVerified` is gone: it was
+    # only ever written by the model re-typing that verdict into caller_details, and across 6
+    # production calls and 13 simulation runs it was right only when an st_customer tool result
+    # happened to still be in context. It killed sheet row 735 and the 2026-09-13 call from
+    # the same customer, and on agent v9 it began inventing ids instead of leaving them blank.
+    # See .claude/braconier/BACKEND_POSTCALL_SPEC.md in voiceagent-st-webhook.
+    'isExistingCustomer': ('st_customer_verified', 'isExistingCustomer',
+                           'is_existing_customer', 'existing_customer'),
     # Whether the caller actually said WHERE and WHAT. An emergency and a known customer
     # are not enough to send a van: on call_121e51914c88e4c186f810787e7 the analyser wrote
     # is_emergency TRUE from the words "heavy HVAC emergency" on a 43-second call that
@@ -79,6 +86,12 @@ FIELD_ALIASES = {
     'stLocationId':   ('st_location_id', 'locationId'),
 }
 
+# Whether an unverified caller may reach a technician after hours. True keeps the rule
+# Braconier asked for: 24x7 dispatch for accounts we already service. Flipping it to False
+# dispatches on emergency + intake alone, which is the only behaviour this constant changes.
+# Mirrored by CONFIG.REQUIRE_VERIFIED_CUSTOMER in the Apps Script; change both together.
+REQUIRE_VERIFIED_CUSTOMER = True
+
 def is_dispatchable(extracted_vars):
     """True only when a technician may be contacted for this call.
 
@@ -86,9 +99,12 @@ def is_dispatchable(extracted_vars):
     a caller verified against a ServiceTrade customer account, who said WHERE the work is
     and WHAT is wrong. Anything short of that is a dispatch-team follow-up.
     """
+    required = ['isitEmergency', 'intakeComplete']
+    if REQUIRE_VERIFIED_CUSTOMER:
+        required.append('isExistingCustomer')
     return all(
         str(extracted_vars.get(field, '')).upper() == 'TRUE'
-        for field in ('isitEmergency', 'isExistingCustomer', 'intakeComplete')
+        for field in required
     )
 
 def lookup_alias(source, field):
@@ -100,6 +116,281 @@ def lookup_alias(source, field):
         if value is not None and value != '':
             return value
     return None
+
+# ---------------------------------------------------------------------------
+# Post-call resolvers.
+#
+# Every value below is derived from the call payload itself — from tool RESPONSES and from
+# the inbound webhook's dynamic variables — never from a value the model chose to report.
+# That distinction is the whole point. On sheet row 735 the lookup had already succeeded and
+# the call carried st_customer_verified "true" with a location id, and the row still
+# dispatched nobody, because the gate read the model's copy of that verdict instead.
+# ---------------------------------------------------------------------------
+
+def _first_non_empty(*values):
+    """First value that is not None and not an empty/whitespace string."""
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ''
+
+def _json_or_none(text):
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+def _is_true(value):
+    return str(value).strip().lower() == 'true'
+
+def resolve_st_verdict(call_data):
+    """(verified, location_id, company_name, location_name) — the ServiceTrade lookup's answer.
+
+    Three sources, in order:
+
+    1. Every st_customer tool RESULT in the transcript. Scanned rather than read off
+       collected_dynamic_variables because that dict keeps only the LAST response per tool, so
+       a later, worse call overwrites a good verdict — on call_1ffac22f92b211faf814bc09707 the
+       agent called st_customer three times and only the middle one verified the account,
+       while the third returned no_contact_match and is what `collected` ended up holding.
+       A verified response carrying a location id beats a verified response without one.
+    2. retell_llm_dynamic_variables — what the inbound webhook resolved before the greeting.
+       This is the source that fixes row 735 and the 2026-09-13 call.
+    3. collected_dynamic_variables, for completeness.
+
+    Returns False and blanks when nothing verified. That is a verdict, not an absence.
+    """
+    best = None
+    for entry in call_data.get('transcript_with_tool_calls') or []:
+        if entry.get('role') != 'tool_call_result':
+            continue
+        payload = _json_or_none(entry.get('content', ''))
+        data = (payload or {}).get('data')
+        if not isinstance(data, dict) or not _is_true(data.get('st_customer_verified')):
+            continue
+        if best is None or (not best.get('st_location_id') and data.get('st_location_id')):
+            best = data
+    if best:
+        return (True,
+                str(best.get('st_location_id') or ''),
+                str(best.get('st_company_name') or ''),
+                str(best.get('st_location_name') or ''))
+
+    for source in (call_data.get('retell_llm_dynamic_variables') or {},
+                   call_data.get('collected_dynamic_variables') or {}):
+        if isinstance(source, dict) and _is_true(source.get('st_customer_verified')):
+            return (True,
+                    str(source.get('st_location_id') or ''),
+                    str(source.get('st_company_name') or ''),
+                    str(source.get('st_location_name') or ''))
+
+    return False, '', '', ''
+
+def resolve_emergency(call_data):
+    """(is_emergency, emergency_type). The isEmergency tool before the post-call analyser.
+
+    emergency_type is NOT evidence of an emergency and must never be used to infer one:
+    call_9f9c53201efc21491089b95771e carries emergency_type HVAC with is_emergency false,
+    correctly — it was a work-order status enquiry, not a callout.
+    """
+    collected = call_data.get('collected_dynamic_variables') or {}
+    analysis = (call_data.get('call_analysis') or {}).get('custom_analysis_data') or {}
+    # Spellings come from FIELD_ALIASES, not from a second list here. A Retell tool rename
+    # once cost two weeks of silently missed dispatches; one table or none.
+    #
+    # Tool responses are read BEFORE the analyser. The agent calling isEmergency is a thing
+    # that happened; the analyser's verdict is a reading of a transcript. When they disagree
+    # the record of the event wins — otherwise an analyser that returns false buries a tool
+    # call that plainly said true, and the emergency is filed as a message.
+    raw_emergency = _first_non_empty(lookup_alias(collected, 'isitEmergency'),
+                                     _scan_tool_results(call_data, 'is_emergency',
+                                                        'isitEmergency', 'isEmergency'),
+                                     lookup_alias(analysis, 'isitEmergency'))
+    emergency_type = _first_non_empty(lookup_alias(collected, 'emergencyType'),
+                                      _scan_tool_results(call_data, 'emergency_type',
+                                                         'emergencyType', 'serviceLineName'),
+                                      lookup_alias(analysis, 'emergencyType'))
+    return _is_true(raw_emergency), emergency_type
+
+def resolve_intake(call_data):
+    """(address, description, intake_complete) — derived, never the model's boolean.
+
+    validated_address is load-bearing, not a backup: on call_1ffac22f92b211faf814bc09707 the
+    extract tool never stored serviceAddress and the validate_address response is the only
+    in-tool copy of "3051 S Elm St, Denver, CO 80222".
+
+    The analyser's own intake_complete is not consulted. On that same call it returned false
+    with both an address and a description captured, because it read "the location did not
+    match a ServiceTrade site" as "no location was given", and nobody was dispatched to a
+    leaking school.
+    """
+    collected = call_data.get('collected_dynamic_variables') or {}
+    analysis = (call_data.get('call_analysis') or {}).get('custom_analysis_data') or {}
+    address = _first_non_empty(lookup_alias(collected, 'serviceAddress'),
+                               collected.get('validated_address'),
+                               lookup_alias(analysis, 'serviceAddress'),
+                               _scan_tool_results(call_data, 'serviceAddress',
+                                                  'validated_address'))
+    description = _first_non_empty(collected.get('issueDescription'),
+                                   analysis.get('issue_description'),
+                                   _scan_tool_results(call_data, 'issueDescription',
+                                                      'issue_description'))
+    return address, description, bool(address and description)
+
+def _scan_tool_results(call_data, *keys):
+    """First non-empty value for any of `keys` across every tool response on the transcript.
+
+    collected_dynamic_variables is a summary that keeps only the last write per tool, and it
+    can be empty even when the tools ran. The responses themselves are the durable record, so
+    a value the agent captured is recoverable from them even when nothing else kept it.
+    """
+    for entry in call_data.get('transcript_with_tool_calls') or []:
+        if entry.get('role') != 'tool_call_result':
+            continue
+        payload = _json_or_none(entry.get('content', ''))
+        if not payload:
+            continue
+        for scope in (payload.get('variables'), payload.get('data'), payload):
+            if not isinstance(scope, dict):
+                continue
+            value = _first_non_empty(*(scope.get(key) for key in keys))
+            if value:
+                return value
+    return ''
+
+# The same endpoint the inbound webhook and the in-call st_customer tool both call, so there
+# is exactly one resolver behind every verdict. agent_id picks the ServiceTrade credentials,
+# and Braconier's Main Router is the id both of those paths already use.
+ST_VERIFY_URL = os.environ.get(
+    'ST_VERIFY_URL', 'https://voiceagent-st-webhook.vercel.app/st-verify-customer')
+ST_VERIFY_AGENT_ID = os.environ.get('ST_VERIFY_AGENT_ID', 'agent_41010d0d8c1f46cf1d9dfcddbf')
+# The lookup itself measures ~60ms and the endpoint holds itself to a 4s deadline. This is the
+# ceiling on how long a post-call retry may delay the sheet write, not a target.
+ST_VERIFY_TIMEOUT_S = 6
+
+def _ten_digits(value):
+    """Ten NANP digits, or '' — the only form the lookup accepts as a search term."""
+    digits = ''.join(ch for ch in str(value or '') if ch.isdigit())
+    if len(digits) == 11 and digits.startswith('1'):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else ''
+
+def st_verify_lookup(from_number, search=None, spoken_location=None, attempt=1):
+    """Run the ServiceTrade lookup. Returns its data dict, or None on any failure.
+
+    Never raises. This runs inside the post-call webhook, and a ServiceTrade outage must
+    degrade the row to "not verified" — which is what it already was — rather than lose the
+    sheet write and the office email along with it.
+    """
+    body = {'attempt': attempt}
+    if search:
+        body['search'] = search
+    if spoken_location:
+        body['spoken_location'] = spoken_location
+    query = urllib.parse.urlencode({'agent_id': ST_VERIFY_AGENT_ID,
+                                    'from_number': from_number})
+    try:
+        request = urllib.request.Request(
+            f'{ST_VERIFY_URL}?{query}',
+            data=json.dumps(body).encode('utf-8'),
+            headers={'Content-Type': 'application/json'},
+            method='POST')
+        with urllib.request.urlopen(request, timeout=ST_VERIFY_TIMEOUT_S,
+                                    context=ssl.create_default_context()) as response:
+            parsed = json.loads(response.read().decode('utf-8'))
+    except Exception as exc:
+        print(f"[ST_VERIFY] lookup failed ({body}): {exc}")
+        return None
+    data = parsed.get('data') if isinstance(parsed, dict) else None
+    return data if isinstance(data, dict) else None
+
+def _apply_verdict(extracted_vars, data, step):
+    """Copy a verified lookup response onto the extracted variables. No-op if it isn't one.
+
+    Returns True when verified. `data is None` means the lookup never answered — an outage,
+    not a refusal — and the caller must keep those two apart.
+    """
+    if not data or not _is_true(data.get('st_customer_verified')):
+        reason = (data or {}).get('st_customer_reason', 'no response')
+        print(f"[ST_VERIFY] {step}: not verified ({reason})")
+        return False
+    extracted_vars['isExistingCustomer'] = 'TRUE'
+    for key, field in (('st_location_id', 'stLocationId'),
+                       ('st_company_name', 'stCompanyName'),
+                       ('st_location_name', 'stLocationName')):
+        value = str(data.get(key) or '')
+        if value:
+            extracted_vars[field] = value
+    print(f"[ST_VERIFY] {step}: verified {extracted_vars.get('stCompanyName')!r} "
+          f"location {extracted_vars.get('stLocationId')!r}")
+    return True
+
+def enrich_st_verdict(extracted_vars, call_data, lookup=None):
+    """Steps 2-4 of the resolution chain: ask ServiceTrade again, after the call.
+
+    The payload probe in extract_variables_v3 covers every call where the lookup ran and
+    answered — which is most of them, including both of the emergencies that were dropped.
+    What it cannot cover is a call where the lookup never ran at all: the inbound webhook
+    timed out, or ServiceTrade was down, so there is nothing on the call object to read.
+    from_number is always there, though. It is telephony metadata, not a model output, so it
+    is the one key that can still find the contact and the location afterwards.
+
+    Also catches a caller who was added to ServiceTrade between the call and this webhook.
+
+    Returns extracted_vars, always. Every failure leaves the row exactly as it was.
+    """
+    lookup = lookup or st_verify_lookup
+    dialled = _ten_digits(call_data.get('from_number'))
+
+    # Keyed off what the CALL said, not off extracted_vars — by this point the analyser may
+    # already have filled isExistingCustomer with a guess, and a guess is exactly what should
+    # send us to ServiceTrade rather than what should stop us going.
+    verified, _, _, _ = resolve_st_verdict(call_data)
+
+    if not verified and dialled:
+        # Step 2 — the number they rang from. This is the lookup the inbound webhook should
+        # have done and, on these calls, did not.
+        first = lookup(f'+1{dialled}', attempt=1)
+        answered = first is not None
+        verified = _apply_verdict(extracted_vars, first, 'step 2 (caller id)')
+
+        # Step 3 — a callback number the caller stated that is not the one they rang from.
+        # This is the in-call Branch 3 retry, done in code: on call_cdf5e305 the agent needed
+        # three numbers before one verified, and the prompt reaches that branch rarely.
+        stated = _ten_digits(extracted_vars.get('fromNumber'))
+        if not verified and stated and stated != dialled:
+            second = lookup(f'+1{dialled}', search=stated, attempt=2)
+            answered = answered or second is not None
+            verified = _apply_verdict(extracted_vars, second, 'step 3 (stated callback)')
+
+        # ServiceTrade answered and the answer was no. That outranks anything inferred from
+        # the transcript: on call_720f9261 the analyser asserted the caller was on an account
+        # when no lookup had ever matched them, and a technician was sent. An outage — no
+        # answer at all — is left alone, because refusing a caller over a timeout is worse.
+        if answered and not verified and str(
+                extracted_vars.get('isExistingCustomer', '')).upper() == 'TRUE':
+            print("[ST_VERIFY] ServiceTrade says no; dropping the unsupported TRUE")
+            extracted_vars['isExistingCustomer'] = 'FALSE'
+            # And the matched record with it. A location id on a row ServiceTrade just
+            # refused is unsupported by the same argument, and leaving it there would put a
+            # site on the technician brief for a caller we cannot place.
+            for field in ('stLocationId', 'stCompanyName', 'stLocationName'):
+                extracted_vars[field] = ''
+
+    # Step 4 — verified but no site. Resolve the location id from the address we captured, so
+    # the technician brief and the ServiceTrade job have somewhere to point.
+    if verified and not extracted_vars.get('stLocationId') and dialled:
+        address = extracted_vars.get('serviceAddress', '')
+        if address:
+            _apply_verdict(extracted_vars,
+                           lookup(f'+1{dialled}', spoken_location=address, attempt=1),
+                           'step 4 (spoken location)')
+
+    return extracted_vars
 
 def fetch_call_from_retell(call_id, api_key):
     """Fetch the full call object from the Retell API."""
@@ -289,11 +580,51 @@ def extract_variables_v3(call_data):
             if intake:
                 variables['intakeComplete'] = intake
 
+    # Source 0: the three gate inputs, resolved from the call itself before anything else
+    # runs. These are deliberately set FIRST, because absorb() only ever fills a blank — so
+    # once they hold a value no later source, and in particular not the post-call analyser,
+    # can move them. The analyser has been caught writing a wrong boolean four separate ways
+    # across nine real calls: a false "false" on verification twice, an unsupported "true"
+    # that put a technician on the road for a caller no lookup ever matched, and a false
+    # "false" on intake for a leaking school with a validated address on file.
+    # Each resolver only ever ASSERTS — it fills a value it has evidence for and stays silent
+    # otherwise, so the existing chain below still runs for everything it cannot see. That
+    # keeps "nothing was said" distinguishable from "we looked and the answer is no", which
+    # ensure_complete_data() depends on when the analysis has not landed yet.
+    verified, st_location_id, st_company_name, st_location_name = resolve_st_verdict(call_data)
+    if verified:
+        variables['isExistingCustomer'] = 'TRUE'
+        variables['stLocationId'] = st_location_id
+        variables['stCompanyName'] = st_company_name
+        variables['stLocationName'] = st_location_name
+
+    is_emergency, emergency_type = resolve_emergency(call_data)
+    if is_emergency:
+        variables['isitEmergency'] = 'TRUE'
+        emergency_source = 'resolve_emergency'
+    if emergency_type:
+        variables['emergencyType'] = emergency_type
+
+    resolved_address, resolved_description, intake_complete = resolve_intake(call_data)
+    if resolved_address:
+        variables['serviceAddress'] = resolved_address
+    if intake_complete:
+        variables['intakeComplete'] = 'TRUE'
+
+    print(f"[SHEETS3] resolved from payload -> verified={verified} "
+          f"locationId={st_location_id!r} emergency={is_emergency} "
+          f"type={emergency_type!r} intake={intake_complete}")
+
     # Source 1: collected_dynamic_variables — written mid-call by extraction tools.
     collected_vars = call_data.get('collected_dynamic_variables') or {}
     absorb(collected_vars, 'collected_dynamic_variables')
 
-    # Source 2: call_analysis.custom_analysis_data — post-call analysis, richest source.
+    # Source 2: the inbound webhook's own variables. Consulted after the mid-call tools, which
+    # are fresher, and before the analyser, which guesses. Nothing read this key before, which
+    # is why a call could carry st_location_id and still reach the sheet with column AA blank.
+    absorb(call_data.get('retell_llm_dynamic_variables') or {}, 'retell_llm_dynamic_variables')
+
+    # Source 3: call_analysis.custom_analysis_data — post-call analysis, richest source.
     absorb(custom_data, 'custom_analysis_data')
 
     if custom_data:
@@ -345,7 +676,7 @@ def extract_variables_v3(call_data):
         nested = result.get('variables')
         absorb(nested if isinstance(nested, dict) else result, label)
 
-    # Source 3: the extract_variables tool result specifically, if the agent called it.
+    # Source 4: the extract_variables tool result specifically, if the agent called it.
     extract_tool_id = None
     for entry in transcript_with_tools:
         if (entry.get('role') == 'tool_call_invocation' and
@@ -358,13 +689,43 @@ def extract_variables_v3(call_data):
                     entry.get('tool_call_id') == extract_tool_id):
                 absorb_tool_result(entry, 'extract_variables_tool')
 
-    # Source 4: any other tool result carrying one of our fields.
+    # Source 5: any other tool result carrying one of our fields.
     for entry in transcript_with_tools:
         if entry.get('role') == 'tool_call_result':
             absorb_tool_result(entry, 'tool_call_result')
 
-    # Source 5: direct fields on the call object (last resort).
+    # Source 6: direct fields on the call object (last resort).
     absorb(call_data, 'call_data')
+
+    # The analyser may fill a gap; it may not be the SOLE source of a verification verdict.
+    # Whether a caller is on an account is a lookup fact, not something to infer from a
+    # transcript — and on call_720f9261f42a2a630b84f21da2a it inferred `true` for a caller
+    # where the inbound lookup said no_contact_match, st_customer was never invoked, and no
+    # company or location was ever resolved. That row dispatched a technician.
+    payload_claim = _first_non_empty(
+        lookup_alias(call_data.get('retell_llm_dynamic_variables') or {}, 'isExistingCustomer'),
+        lookup_alias(collected_vars, 'isExistingCustomer'))
+    if (not verified and payload_claim and not _is_true(payload_claim)
+            and str(variables['isExistingCustomer']).upper() == 'TRUE'):
+        print(f"[SHEETS3] the lookup said {payload_claim!r} and nothing verified, but the "
+              f"analyser claimed isExistingCustomer TRUE — refusing it")
+        variables['isExistingCustomer'] = 'FALSE'
+
+    # Intake is decided LAST, from the values that actually survived, because the absorb chain
+    # above reaches sources resolve_intake cannot see on its own — a tool response the agent
+    # made but nothing else kept a copy of. Deciding it early said "incomplete" on rows whose
+    # address and description were both sitting in the finished variables a moment later.
+    # This only ever turns intake ON: a missing address stays a refusal.
+    final_address = _first_non_empty(variables.get('serviceAddress'), resolved_address)
+    final_description = _first_non_empty(
+        resolved_description, variables.get('issueDescription'),
+        _scan_tool_results(call_data, 'issueDescription', 'issue_description'))
+    if final_address and final_description:
+        if variables['intakeComplete'] != 'TRUE':
+            print(f"[SHEETS3] intake complete on the final values "
+                  f"(address {final_address!r}, problem {final_description!r})")
+        variables['intakeComplete'] = 'TRUE'
+        variables['serviceAddress'] = final_address
 
     if not variables['callSummary']:
         variables['callSummary'] = str(analysis.get('call_summary', ''))
@@ -796,6 +1157,11 @@ class handler(BaseHTTPRequestHandler):
                 call_data, extracted_vars = ensure_complete_data(call_data, extracted_vars)
                 analysis = call_data.get("call_analysis", {})
                 call_summary = analysis.get("call_summary", "") or call_summary
+
+                # Ask ServiceTrade again when the call itself carried no answer. Runs before
+                # the gate, so a caller the inbound lookup never managed to resolve is still
+                # dispatched on the strength of the number they rang from.
+                extracted_vars = enrich_st_verdict(extracted_vars, call_data)
                 print(f"[SHEETS3 API] FINAL EXTRACTED VARIABLES: {extracted_vars}")
                 
                 # Look up the on-call technician only for a call that may actually reach
