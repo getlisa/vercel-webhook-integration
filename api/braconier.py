@@ -161,6 +161,7 @@ def resolve_st_verdict(call_data):
     2. retell_llm_dynamic_variables — what the inbound webhook resolved before the greeting.
        This is the source that fixes row 735 and the 2026-09-13 call.
     3. collected_dynamic_variables, for completeness.
+    4. The site the address lookup last offered — see _last_offered_site.
 
     Returns False and blanks when nothing verified. That is a verdict, not an absence.
     """
@@ -188,7 +189,43 @@ def resolve_st_verdict(call_data):
                     str(source.get('st_company_name') or ''),
                     str(source.get('st_location_name') or ''))
 
+    site = _last_offered_site(call_data)
+    if site:
+        return (True,
+                str(site.get('st_location_id') or ''),
+                str(site.get('st_company_name') or ''),
+                str(site.get('st_location_name') or ''))
+
     return False, '', '', ''
+
+def _last_offered_site(call_data):
+    """The site the LAST st_match_address response offered, or None.
+
+    The address lookup offers a site on one turn and verifies it on the next, when the agent
+    sends location_id back after the caller says yes. That second turn is the only one that
+    carries st_customer_verified, so a skipped confirm call dropped a matched customer: row 854
+    (call_e43f3cc306168d304f7843285b1) offered the UPS site, the caller said "Sure.", the agent
+    moved on, and nobody was paged. Row 834 (call_ea34e0ada1ceccdfd9f35d19576) made the call
+    before the confirm turn returned the flag, and was dropped the same way.
+
+    The site id is ServiceTrade's own answer — Retell maps it from the HTTP response — so it is
+    evidence in a way caller_details.locationId, which the model types, is not.
+
+    Only the LAST response counts, because every reply that is not a single-site match ships
+    st_location_id blank (asking for a company, the address in parts, a terminal stop, an
+    error). A caller who says no is asked again, and that later reply withdraws the offer.
+    Recognised by shape rather than tool name: only this tool answers with address_found.
+    """
+    last = None
+    for entry in call_data.get('transcript_with_tool_calls') or []:
+        if entry.get('role') != 'tool_call_result':
+            continue
+        data = (_json_or_none(entry.get('content', '')) or {}).get('data')
+        if isinstance(data, dict) and 'address_found' in data:
+            last = data
+    if last and _is_true(last.get('address_found')) and str(last.get('st_location_id') or '').strip():
+        return last
+    return None
 
 def resolve_emergency(call_data):
     """(is_emergency, emergency_type). The isEmergency tool before the post-call analyser.
