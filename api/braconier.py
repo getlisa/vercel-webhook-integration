@@ -12,18 +12,13 @@ import hashlib
 # Simple file-based deduplication to persist across serverless invocations
 PROCESSED_CALLS_FILE = '/tmp/processed_calls_sheets3.json'
 
-# Used when RETELL_API_KEY is unset or blank. Kept as a literal because a missing key
-# turns every re-fetch below into a silent no-op.
-RETELL_API_KEY_FALLBACK = '***REMOVED***'
-
-
 def retell_api_key():
-    """The Retell key to authenticate with, ignoring an env var that is set but empty.
+    """The Retell key from RETELL_API_KEY, or '' when the variable is unset or blank.
 
-    os.environ.get(name, default) returns '' for a variable that exists with an empty
-    value, so the previous form authenticated with nothing and every retry failed.
+    There is deliberately no fallback literal: this repository is public, so any key
+    written here is a leaked key.
     """
-    return os.environ.get('RETELL_API_KEY', '').strip() or RETELL_API_KEY_FALLBACK
+    return os.environ.get('RETELL_API_KEY', '').strip()
 
 def normalize_phone_number(value):
     """Return a normalized E.164-like phone number when possible."""
@@ -459,6 +454,10 @@ def ensure_complete_data(call_data, extracted_vars):
         return call_data, extracted_vars
 
     api_key = retell_api_key()
+    if not api_key:
+        # Without a key every attempt can only 401, so skip the sleeps and say why.
+        print("[RETRY] RETELL_API_KEY is not set - skipping re-fetch")
+        return call_data, extracted_vars
 
     call_id = call_data.get('call_id', '')
     print(f"[RETRY] Missing critical fields {missing} for {call_id}, waiting 3s then re-fetching...")
