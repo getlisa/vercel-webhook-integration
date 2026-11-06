@@ -57,9 +57,12 @@ def ensure_complete_data(call_data, extracted_vars):
     if not missing:
         return call_data, extracted_vars
 
-    # os.environ.get(name, default) returns '' for a variable that exists with an empty
-    # value, so the previous form authenticated with nothing.
-    api_key = os.environ.get('RETELL_API_KEY', '').strip() or '***REMOVED***'
+    # No fallback literal: this repository is public, so any key written here is leaked.
+    # Without a key every attempt can only 401, so skip the sleeps and say why.
+    api_key = os.environ.get('RETELL_API_KEY', '').strip()
+    if not api_key:
+        print("[RETRY] RETELL_API_KEY is not set - skipping re-fetch")
+        return call_data, extracted_vars
 
     call_id = call_data.get('call_id', '')
     print(f"[RETRY] Missing critical fields {missing} for {call_id}, waiting 3s then re-fetching...")
